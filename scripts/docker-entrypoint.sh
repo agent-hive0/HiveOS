@@ -26,4 +26,11 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+# Fly.io and other platforms mount volumes as root-owned by default.
+# Ensure /paperclip is writable by the node user even when UID/GID didn't change.
+if [ -d /paperclip ] && [ "$(stat -c '%u' /paperclip)" != "$(id -u node)" ]; then
+    echo "Fixing /paperclip ownership for node user"
+    chown -R node:node /paperclip
+fi
+
 exec gosu node "$@"
