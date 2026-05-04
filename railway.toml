@@ -1,0 +1,14 @@
+# Railway deployment config for Hive (Paperclip fork)
+# Forces Railway to deploy ONE service from the root Dockerfile,
+# ignoring the pnpm monorepo packages.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "docker-entrypoint.sh node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js"
+healthcheckPath = "/"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
