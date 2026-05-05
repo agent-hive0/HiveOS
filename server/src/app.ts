@@ -38,6 +38,7 @@ import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
+import { hiveBootstrapRoutes } from "./routes/hive-bootstrap.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
@@ -132,6 +133,23 @@ export async function createApp(
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
+    /**
+     * Better-auth instance used by the Hive control-plane bootstrap endpoint
+     * to programmatically create the CEO user + session. Only required when
+     * running in `authenticated` mode; in `local_trusted` mode this is unused.
+     */
+    betterAuth?: {
+      api: {
+        signUpEmail: (input: {
+          body: { name: string; email: string; password: string };
+          asResponse?: boolean;
+        }) => Promise<unknown>;
+        signInEmail: (input: {
+          body: { email: string; password: string };
+          asResponse?: boolean;
+        }) => Promise<unknown>;
+      };
+    };
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
   },
 ) {
@@ -290,6 +308,9 @@ export async function createApp(
       allowedHostnames: opts.allowedHostnames,
     }),
   );
+  if (opts.betterAuth) {
+    api.use(hiveBootstrapRoutes(db, { auth: opts.betterAuth }));
+  }
   app.use("/api", api);
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "API route not found" });

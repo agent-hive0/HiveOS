@@ -477,6 +477,20 @@ export async function startServer(): Promise<StartedServer> {
   
   let authReady = config.deploymentMode === "local_trusted";
   let betterAuthHandler: RequestHandler | undefined;
+  let betterAuthInstance:
+    | {
+        api: {
+          signUpEmail: (input: {
+            body: { name: string; email: string; password: string };
+            asResponse?: boolean;
+          }) => Promise<unknown>;
+          signInEmail: (input: {
+            body: { email: string; password: string };
+            asResponse?: boolean;
+          }) => Promise<unknown>;
+        };
+      }
+    | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -514,6 +528,7 @@ export async function startServer(): Promise<StartedServer> {
     );
     const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
     betterAuthHandler = createBetterAuthHandler(auth);
+    betterAuthInstance = auth as unknown as typeof betterAuthInstance;
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
@@ -615,6 +630,7 @@ export async function startServer(): Promise<StartedServer> {
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
+    betterAuth: betterAuthInstance,
     resolveSession,
     pluginWorkerManager,
   });
