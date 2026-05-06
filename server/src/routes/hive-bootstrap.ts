@@ -8,6 +8,7 @@ import { logger } from "../middleware/logger.js";
 import {
   accessService,
   companyService,
+  goalService,
   logActivity,
 } from "../services/index.js";
 
@@ -17,6 +18,12 @@ const bootstrapSchema = z.object({
   adminName: z.string().min(1).optional(),
   companyName: z.string().min(1),
   hiveSecret: z.string().min(1),
+  // Optional founder brief (markdown). When supplied, the bootstrap
+  // endpoint creates a "Founder's brief" Goal in the new company so
+  // the CEO has founder context on first heartbeat. Older callers
+  // (Hive control plane prior to onboarding 2.0) omit this and
+  // everything still works.
+  briefMarkdown: z.string().min(1).max(10_000).optional(),
 });
 
 type AuthLike = {
@@ -88,6 +95,7 @@ export function hiveBootstrapRoutes(db: Db, opts: { auth: AuthLike }): Router {
   const router = Router();
   const access = accessService(db);
   const companies = companyService(db);
+  const goals = goalService(db);
 
   router.post("/access/hive-bootstrap", async (req, res) => {
     const expectedSecret = process.env.HIVE_BOOTSTRAP_SECRET;
@@ -103,8 +111,14 @@ export function hiveBootstrapRoutes(db: Db, opts: { auth: AuthLike }): Router {
       return;
     }
 
-    const { adminEmail, adminPassword, adminName, companyName, hiveSecret } =
-      parsed.data;
+    const {
+      adminEmail,
+      adminPassword,
+      adminName,
+      companyName,
+      hiveSecret,
+      briefMarkdown,
+    } = parsed.data;
 
     if (!timingSafeStringEqual(hiveSecret, expectedSecret)) {
       res.status(403).json({ error: "invalid_hive_secret" });
@@ -239,8 +253,31 @@ export function hiveBootstrapRoutes(db: Db, opts: { auth: AuthLike }): Router {
         createdCompany = true;
       }
 
+      // Seed the founder's brief as a Goal so the CEO agent picks it
+      // up on first heartbeat. Idempotent: only seeds when both the
+      // company is newly created AND a brief was supplied. Existing
+      // companies (replays / retries) get a no-op so we never spam
+      // duplicate goals.
+      let seededBrief = false;
+      if (createdCompany && briefMarkdown) {
+        try {
+          await goals.create(companyId, {
+            title: "Founder's brief",
+            description: briefMarkdown,
+            level: "company",
+            status: "active",
+          });
+          seededBrief = true;
+        } catch (err) {
+          logger.warn(
+            { requestId, err },
+            "[hive-bootstrap] failed to seed founder brief goal (non-fatal)",
+          );
+        }
+      }
+
       logger.info(
-        { requestId, userId, companyId, createdUser, createdCompany },
+        { requestId, userId, companyId, createdUser, createdCompany, seededBrief },
         "[hive-bootstrap] complete",
       );
 
@@ -250,6 +287,7 @@ export function hiveBootstrapRoutes(db: Db, opts: { auth: AuthLike }): Router {
         companyId,
         createdUser,
         createdCompany,
+        seededBrief,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
