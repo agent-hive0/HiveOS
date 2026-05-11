@@ -61,6 +61,10 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Pin npm / npx / pnpm caches to ephemeral overlay disk so they never
+# accumulate on the persistent /paperclip volume. (See incident
+# 2026-05-11: 745 MB of _cacache + _npx filled a 1 GB volume and took
+# the colony's DB offline.)
 ENV NODE_ENV=production \
   HOME=/paperclip \
   HOST=0.0.0.0 \
@@ -73,7 +77,12 @@ ENV NODE_ENV=production \
   PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
-  OPENCODE_ALLOW_ALL_MODELS=true
+  OPENCODE_ALLOW_ALL_MODELS=true \
+  npm_config_cache=/tmp/npm-cache \
+  NPM_CONFIG_CACHE=/tmp/npm-cache \
+  NPM_CONFIG_PREFER_OFFLINE=true \
+  PNPM_HOME=/tmp/pnpm-home \
+  XDG_CACHE_HOME=/tmp/cache
 
 VOLUME ["/paperclip"]
 EXPOSE 3100
