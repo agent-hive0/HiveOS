@@ -1,0 +1,41 @@
+name: Fly Restart
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Fly app name (e.g. hive-adams-workspace11)
+        required: true
+        type: string
+      machine:
+        description: Machine id (optional). If empty, restarts all machines for the app.
+        required: false
+        type: string
+
+concurrency:
+  group: fly-restart-${{ inputs.app }}
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    name: Restart Fly app
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Restart machine(s)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.machine }}" ]; then
+            echo "Restarting machine ${{ inputs.machine }} on ${{ inputs.app }}"
+            flyctl machine restart "${{ inputs.machine }}" -a "${{ inputs.app }}"
+          else
+            echo "Restarting all machines on ${{ inputs.app }}"
+            flyctl apps restart "${{ inputs.app }}"
+          fi
+      - name: Show machine status
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl machine list -a "${{ inputs.app }}" || true
