@@ -33,4 +33,21 @@ if [ -d /paperclip ] && [ "$(stat -c '%u' /paperclip)" != "$(id -u node)" ]; the
     chown -R node:node /paperclip
 fi
 
+# Stage ephemeral cache dirs on overlay disk so npm/npx/pnpm never
+# touch the persistent /paperclip volume. Matches the ENV pins in the
+# Dockerfile (npm_config_cache, PNPM_HOME, XDG_CACHE_HOME).
+for d in /tmp/npm-cache /tmp/pnpm-home /tmp/cache; do
+    mkdir -p "$d"
+    chown node:node "$d" 2>/dev/null || true
+done
+
+# Self-heal: scrub leftover npm/npx caches that older image versions
+# wrote onto the persistent volume. Safe to delete — they're throwaway
+# package caches, not state. Idempotent + bounded so we don't run
+# every minute: only if any cache dir exists.
+if [ -d /paperclip/.npm/_cacache ] || [ -d /paperclip/.npm/_npx ] || [ -d /paperclip/.cache/node ]; then
+    echo "Pruning legacy npm/npx caches from persistent volume"
+    rm -rf /paperclip/.npm/_cacache /paperclip/.npm/_npx /paperclip/.npm/_logs /paperclip/.cache/node 2>/dev/null || true
+fi
+
 exec gosu node "$@"
