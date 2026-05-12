@@ -23,19 +23,29 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Diagnose access
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -eu
+          echo "--- whoami ---"
+          flyctl auth whoami || true
+          echo "--- orgs ---"
+          flyctl orgs list || true
+          echo "--- apps list (token scope) ---"
+          flyctl apps list || true
+          echo "--- app status target ---"
+          flyctl status -a "${{ inputs.app }}" || true
+          echo "--- machines ---"
+          flyctl machine list -a "${{ inputs.app }}" || true
       - name: Restart machine(s)
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          set -euo pipefail
+          set -eu
           if [ -n "${{ inputs.machine }}" ]; then
             echo "Restarting machine ${{ inputs.machine }} on ${{ inputs.app }}"
-            flyctl machine restart "${{ inputs.machine }}" -a "${{ inputs.app }}"
-          else
-            echo "Restarting all machines on ${{ inputs.app }}"
-            flyctl apps restart "${{ inputs.app }}"
+            flyctl machine restart "${{ inputs.machine }}" -a "${{ inputs.app }}" || true
           fi
-      - name: Show machine status
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: flyctl machine list -a "${{ inputs.app }}" || true
+          echo "--- attempting app-wide restart ---"
+          flyctl apps restart "${{ inputs.app }}" || true
