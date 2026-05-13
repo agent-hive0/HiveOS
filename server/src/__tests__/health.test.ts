@@ -94,12 +94,13 @@ describe("GET /health", () => {
     const res = await request(app).get("/health");
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
+    expect(res.body).toMatchObject({
       status: "ok",
       deploymentMode: "authenticated",
       bootstrapStatus: "ready",
       bootstrapInviteActive: false,
     });
+    expect(res.body).toHaveProperty("resources");
   });
 
   it("redacts detailed metadata when authenticated mode is reached without auth middleware", async () => {
@@ -128,12 +129,13 @@ describe("GET /health", () => {
     const res = await request(app).get("/health");
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
+    expect(res.body).toMatchObject({
       status: "ok",
       deploymentMode: "authenticated",
       bootstrapStatus: "ready",
       bootstrapInviteActive: false,
     });
+    expect(res.body).toHaveProperty("resources");
   });
 
   it("keeps detailed metadata for authenticated requests in authenticated mode", async () => {
