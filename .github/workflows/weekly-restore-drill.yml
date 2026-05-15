@@ -1,0 +1,148 @@
+name: Weekly restore drill
+
+# Sprint A.5 PR6 — End-to-end exercise of the colony backup → Tigris → restore
+# loop. Runs against ephemeral CI infrastructure (postgres service container +
+# MinIO standing in for Tigris) every Monday at 09:00 UTC and on demand via
+# workflow_dispatch. The drill script seeds a deterministic fixture, runs the
+# real PR1 backup, wipes the database, runs the real PR2 restore, and asserts
+# every fixture row + sha256 came back byte-identical.
+#
+# We treat this as a release gate: if the drill fails, on-call gets paged via
+# the existing repo workflow-failure routing and the next provisioning batch
+# halts until the failure mode is understood. The decrypted backup is uploaded
+# as an artifact so postmortems can inspect it offline.
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # Mondays · 09:00 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: weekly-restore-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    name: End-to-end backup + restore drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: drill
+          POSTGRES_PASSWORD: drill
+          POSTGRES_DB: drill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U drill -d drill"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: drill-access-key
+          MINIO_ROOT_PASSWORD: drill-secret-key
+          MINIO_DEFAULT_BUCKETS: hive-drill-backups
+        ports:
+          - 9000:9000
+
+    env:
+      DATABASE_URL: postgres://drill:drill@127.0.0.1:5432/drill
+      HIVE_COLONY_SLUG: drill-colony
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.HIVE_DRILL_ENCRYPTION_KEY }}
+      TIGRIS_BUCKET: hive-drill-backups
+      TIGRIS_REGION: us-east-1
+      TIGRIS_ENDPOINT: http://127.0.0.1:9000
+      TIGRIS_ACCESS_KEY_ID: drill-access-key
+      TIGRIS_SECRET_ACCESS_KEY: drill-secret-key
+      # Keep the decrypted .sql.gz on disk so the artifact step can grab it
+      # for postmortem inspection.
+      HIVE_RESTORE_KEEP_SCRATCH: '1'
+      # pg_dump 16 is at /usr/lib/postgresql/16/bin on ubuntu-latest; the
+      # `postgresql-client` apt package below puts a symlink on $PATH so we
+      # do not need this override, but we set it defensively in case a
+      # future runner image diverges.
+      PAPERCLIP_PG_DUMP_PATH: pg_dump
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Postgres 16 client + tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-client-16 \
+            curl \
+            ca-certificates
+          pg_dump --version
+          psql --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @paperclipai/db
+        run: pnpm --filter @paperclipai/db build
+
+      - name: Wait for MinIO + ensure bucket
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live > /dev/null; then
+              echo "MinIO ready"
+              break
+            fi
+            echo "Waiting for MinIO ($i/30)…"
+            sleep 2
+          done
+          # bitnami/minio auto-creates MINIO_DEFAULT_BUCKETS at boot; verify.
+          curl -fsS -o /dev/null \
+            -u drill-access-key:drill-secret-key \
+            http://127.0.0.1:9000/hive-drill-backups/ \
+            || echo "Bucket listing returned non-200 (anonymous), proceeding — drill script will surface the real error."
+
+      - name: Generate ephemeral encryption key if secret unset
+        run: |
+          if [ -z "${BACKUP_ENCRYPTION_KEY:-}" ]; then
+            echo "HIVE_DRILL_ENCRYPTION_KEY repo secret unset — generating an ephemeral key for this run only."
+            key=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")
+            echo "BACKUP_ENCRYPTION_KEY=$key" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run weekly restore drill
+        run: pnpm --filter @paperclipai/server exec tsx scripts/drill-restore.ts
+
+      - name: Collect drill scratch artifacts
+        if: always()
+        run: |
+          mkdir -p drill-artifacts
+          # tsx writes scratch into /tmp/drill-restore-* via mkdtempSync.
+          if compgen -G "/tmp/drill-restore-*" > /dev/null; then
+            cp -R /tmp/drill-restore-* drill-artifacts/ || true
+          fi
+          ls -la drill-artifacts || true
+
+      - name: Upload drill scratch artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-restore-drill-${{ github.run_id }}
+          path: drill-artifacts/
+          retention-days: 14
+          if-no-files-found: ignore
