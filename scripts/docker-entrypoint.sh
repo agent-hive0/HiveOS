@@ -50,4 +50,76 @@ if [ -d /paperclip/.npm/_cacache ] || [ -d /paperclip/.npm/_npx ] || [ -d /paper
     rm -rf /paperclip/.npm/_cacache /paperclip/.npm/_npx /paperclip/.npm/_logs /paperclip/.cache/node 2>/dev/null || true
 fi
 
+# ------------------------------------------------------------------
+# Pre-flight checks. Each check writes one line to /paperclip/preflight.log
+# and either fixes the problem or exits non-zero with a clear reason.
+# The goal: if the server is going to fail to boot, fail HERE so the
+# log line is the actual cause — not 10 rounds of "main child exited".
+# ------------------------------------------------------------------
+PREFLIGHT_LOG=/paperclip/preflight.log
+mkdir -p /paperclip
+: > "$PREFLIGHT_LOG" || true
+
+preflight() {
+    echo "[preflight $(date -u +%FT%TZ)] $*" | tee -a "$PREFLIGHT_LOG"
+}
+
+# 1) Required secrets. Better-auth refuses to boot without these and the
+#    generic "main child exited" log makes it look like a crash loop.
+#    Fail fast with a specific message a customer-visible health check
+#    can read back through /api/internal/preflight.
+MISSING=""
+for v in BETTER_AUTH_SECRET HIVE_BOOTSTRAP_SECRET; do
+    eval "val=\${$v:-}"
+    if [ -z "$val" ]; then
+        MISSING="$MISSING $v"
+    fi
+done
+if [ -n "$MISSING" ]; then
+    preflight "FATAL missing required env:$MISSING"
+    preflight "action: set the secret via \`fly secrets set <KEY>=<VALUE> -a <app>\` and \`fly secrets deploy\`"
+    # Sleep before exit so Fly's restart-loop back-off (8s, 16s, ...) gives
+    # the operator time to see the log without the machine churning.
+    sleep 30
+    exit 78  # EX_CONFIG
+fi
+
+# 2) Disk headroom. Embedded Postgres needs ~50 MB free to start;
+#    growing WAL needs more. Anything <100 MB free is a recipe for
+#    "could not write lock file: No space left on device" and a
+#    10-restart-cap death spiral.
+if command -v df >/dev/null 2>&1; then
+    # df -B1 gives bytes; the 4th column is Available.
+    AVAIL_BYTES=$(df -B1 /paperclip 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$AVAIL_BYTES" ] && [ "$AVAIL_BYTES" -lt 104857600 ]; then
+        preflight "FATAL only ${AVAIL_BYTES} bytes free on /paperclip (<100 MB)"
+        preflight "action: \`fly volume extend <vol-id> -s <bigger-gb> -a <app>\` then restart machine"
+        sleep 30
+        exit 78
+    fi
+    # Warning band: < 20% free — boot but flag it in the log so the
+    # vitals collector picks it up immediately.
+    TOTAL_BYTES=$(df -B1 /paperclip 2>/dev/null | awk 'NR==2 {print $2}')
+    if [ -n "$AVAIL_BYTES" ] && [ -n "$TOTAL_BYTES" ] && [ "$TOTAL_BYTES" -gt 0 ]; then
+        USED_PCT=$(( (TOTAL_BYTES - AVAIL_BYTES) * 100 / TOTAL_BYTES ))
+        if [ "$USED_PCT" -ge 80 ]; then
+            preflight "WARN /paperclip is ${USED_PCT}% full (extend the volume before it hits 95%)"
+        else
+            preflight "ok disk ${USED_PCT}% used"
+        fi
+    fi
+fi
+
+# 3) Postgres data dir sanity. If the directory exists but PG_VERSION is
+#    missing, embedded-postgres will re-init and silently wipe what's
+#    there. Better to refuse and let an operator decide.
+PG_DATA_DIR=/paperclip/instances/${PAPERCLIP_INSTANCE_ID:-default}/db
+if [ -d "$PG_DATA_DIR" ] && [ "$(ls -A "$PG_DATA_DIR" 2>/dev/null | head -1)" ] && [ ! -f "$PG_DATA_DIR/PG_VERSION" ]; then
+    preflight "FATAL $PG_DATA_DIR has files but no PG_VERSION — refusing to re-init (data loss risk)"
+    preflight "action: investigate /paperclip from an SSH session before restarting"
+    sleep 30
+    exit 70  # EX_SOFTWARE
+fi
+preflight "ok pre-flight passed"
+
 exec gosu node "$@"
