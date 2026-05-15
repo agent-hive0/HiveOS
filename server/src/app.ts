@@ -56,6 +56,7 @@ import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-
 import { createPluginEventBus } from "./services/plugin-event-bus.js";
 import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
+import { createColonyBackupScheduler } from "./services/colony-backup-scheduler.js";
 import { createPluginHostServiceCleanup } from "./services/plugin-host-service-cleanup.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
@@ -440,6 +441,8 @@ export async function createApp(
       logger.error({ err }, "Failed to flush pending feedback exports");
     });
   }
+  const colonyBackupScheduler = createColonyBackupScheduler();
+  colonyBackupScheduler.start();
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });
@@ -461,6 +464,7 @@ export async function createApp(
   });
   process.once("exit", () => {
     if (feedbackExportTimer) clearInterval(feedbackExportTimer);
+    colonyBackupScheduler.stop();
     devWatcher?.close();
     viteHtmlRenderer?.dispose();
     hostServiceCleanup.disposeAll();
