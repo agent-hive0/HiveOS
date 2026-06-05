@@ -122,4 +122,18 @@ if [ -d "$PG_DATA_DIR" ] && [ "$(ls -A "$PG_DATA_DIR" 2>/dev/null | head -1)" ] 
 fi
 preflight "ok pre-flight passed"
 
+# ------------------------------------------------------------------
+# Bundled engines (Sim Workflows + Hive memory sidecar). Always-on —
+# no enable flags. hive-engines.sh starts a pgvector Postgres on the
+# volume, runs Sim migrations, and forks Sim app/realtime + the memory
+# sidecar as background children that survive the exec below. Any
+# failure is NON-FATAL: Paperclip must still boot even if an engine
+# can't start, so the colony degrades gracefully instead of crash-
+# looping. (Hermes needs no process here — it's a Paperclip adapter
+# that spawns the `hermes` CLI on demand.)
+# ------------------------------------------------------------------
+if [ -x /usr/local/bin/hive-engines.sh ]; then
+    /usr/local/bin/hive-engines.sh || preflight "WARN hive-engines returned non-zero — engines degraded, Paperclip continuing"
+fi
+
 exec gosu node "$@"

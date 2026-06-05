@@ -46,6 +46,25 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 
+# ---------------------------------------------------------------------------
+# Bundled-engine source images (Hive combined colony image, hive-bootstrap-v3)
+#
+# The colony runs Paperclip + Sim (Workflows) + the Hive memory sidecar +
+# the Hermes agent CLI as ONE image / ONE Fly machine, several processes.
+# We pull Sim's prebuilt, published images and the sidecar image and COPY
+# their artifacts in — same proven pattern Paperclip already relies on for
+# the sidecar. No from-source Sim build (avoids the 60-min CI cap).
+#
+# NOTE: realtime + migrations images are Alpine (musl); the app image is
+# Debian (glibc), same libc family as this colony base. We therefore use
+# the APP image's `bun` (glibc) to run all three — realtime/migrations are
+# pure-JS so their musl-installed node_modules load fine under glibc bun.
+# ---------------------------------------------------------------------------
+FROM ghcr.io/simstudioai/simstudio:latest AS sim_app
+FROM ghcr.io/simstudioai/realtime:latest AS sim_realtime
+FROM ghcr.io/simstudioai/migrations:latest AS sim_migrations
+FROM ghcr.io/agent-hive0/hive-colony-sidecar:v0.1.2 AS hive_sidecar
+
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -58,8 +77,35 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
-COPY scripts/docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# --- Bundled engines: runtime deps -----------------------------------------
+# pgvector-capable Postgres (Sim + memory both need the `vector` extension;
+# Paperclip's embedded PG has no pgvector). Installed from the PGDG apt repo
+# so the `postgresql-17-pgvector` package is guaranteed present. ffmpeg +
+# python venv are Sim app runtime deps; pip is for the Hermes agent CLI.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg python3-pip python3-venv gnupg postgresql-common \
+  && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+  && apt-get install -y --no-install-recommends postgresql-17 postgresql-17-pgvector postgresql-client-17 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Hermes agent CLI. The fork already wires the `hermes_local` adapter
+# (server/src/adapters/registry.ts) + ships hermes-paperclip-adapter as a
+# server dep; the adapter spawns this CLI as a subprocess. Always present,
+# no enable flag.
+RUN pip3 install --no-cache-dir --break-system-packages hermes-agent
+
+# Sim runtime: one glibc `bun` from the app image runs app + realtime +
+# migrations. Bring in each prebuilt tree.
+COPY --from=sim_app /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=sim_app --chown=node:node /app /opt/hive-sim/app
+COPY --from=sim_realtime --chown=node:node /app /opt/hive-sim/realtime
+COPY --from=sim_migrations --chown=node:node /app /opt/hive-sim/migrations
+
+# Hive memory sidecar (same artifact the sidecar-only image ships).
+COPY --from=hive_sidecar --chown=node:node /sidecar /opt/hive-colony-sidecar
+
+COPY scripts/docker-entrypoint.sh scripts/hive-engines.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/hive-engines.sh
 
 # Pin npm / npx / pnpm caches to ephemeral overlay disk so they never
 # accumulate on the persistent /paperclip volume. (See incident
@@ -85,7 +131,8 @@ ENV NODE_ENV=production \
   XDG_CACHE_HOME=/tmp/cache
 
 VOLUME ["/paperclip"]
-EXPOSE 3100
+# 3100 Paperclip · 3000 Sim app · 3002 Sim realtime · 3101 memory sidecar
+EXPOSE 3100 3000 3002 3101
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
