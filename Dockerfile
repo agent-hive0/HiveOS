@@ -63,7 +63,13 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 FROM ghcr.io/simstudioai/simstudio:latest AS sim_app
 FROM ghcr.io/simstudioai/realtime:latest AS sim_realtime
 FROM ghcr.io/simstudioai/migrations:latest AS sim_migrations
-FROM ghcr.io/agent-hive0/hive-colony-sidecar:v0.1.2 AS hive_sidecar
+# NOTE: the memory sidecar (ghcr.io/agent-hive0/hive-colony-sidecar) is a
+# PRIVATE package in a different org; this fork's CI GITHUB_TOKEN can't pull
+# it (403). To bundle memory, make that package public OR add a cross-org
+# read:packages PAT as a repo secret + a second registry login, then restore
+# the `FROM ... AS hive_sidecar` line and the COPY below. hive-engines.sh
+# already self-skips the sidecar when its cli.js is absent, so memory stays
+# dark (not broken) until then.
 
 FROM base AS production
 ARG USER_UID=1000
@@ -101,8 +107,9 @@ COPY --from=sim_app --chown=node:node /app /opt/hive-sim/app
 COPY --from=sim_realtime --chown=node:node /app /opt/hive-sim/realtime
 COPY --from=sim_migrations --chown=node:node /app /opt/hive-sim/migrations
 
-# Hive memory sidecar (same artifact the sidecar-only image ships).
-COPY --from=hive_sidecar --chown=node:node /sidecar /opt/hive-colony-sidecar
+# Hive memory sidecar — see the note above the sim_* FROM stages. Restore
+# the COPY here once the sidecar package is pullable by this fork's CI:
+#   COPY --from=hive_sidecar --chown=node:node /sidecar /opt/hive-colony-sidecar
 
 COPY scripts/docker-entrypoint.sh scripts/hive-engines.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/hive-engines.sh
