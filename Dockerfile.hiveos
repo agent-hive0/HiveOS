@@ -171,8 +171,14 @@ ENV NODE_OPTIONS=--max-old-space-size=3072
 COPY --from=hiveappsrc package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY --from=hiveappsrc packages/colony-sidecar/package.json ./packages/colony-sidecar/
 COPY --from=hiveappsrc packages/colony-db/package.json ./packages/colony-db/
+# Use the hoisted node-linker so the sidecar's runtime deps (e.g. `pg`) land in
+# the root /build/node_modules — that's the only node_modules the production
+# stage copies. With pnpm's default symlinked layout `pg` lives under
+# packages/colony-sidecar/node_modules and is lost, crashing the sidecar at boot
+# (ERR_MODULE_NOT_FOUND: 'pg').
 RUN npm install -g pnpm@10.32.1 \
   && pnpm install --frozen-lockfile --ignore-scripts \
+     --config.node-linker=hoisted \
      --filter @hive/colony-sidecar --filter @hive/colony-db
 COPY --from=hiveappsrc packages/colony-sidecar ./packages/colony-sidecar
 COPY --from=hiveappsrc packages/colony-db ./packages/colony-db
