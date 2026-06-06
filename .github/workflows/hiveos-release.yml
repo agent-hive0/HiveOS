@@ -1,0 +1,185 @@
+name: hiveos release
+
+# Cuts a versioned `hiveos` colony image (Paperclip + embeddable Sim + Hermes +
+# Memory) to ghcr.io/agent-hive0/hiveos. Bundles the NEWEST of each engine,
+# records the exact resolved versions in OCI labels + the build summary, runs a
+# four-engine SMOKE TEST, and only publishes on pass.
+#
+# Bump path: edit the VERSION file (1.0 -> 1.1) and run this workflow, OR pass
+# `version=1.1` to the dispatch. `latest` advances to the newest passing build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "hiveos semver <major>.<minor> (blank = VERSION file)"
+        required: false
+        default: ""
+      sim_ref:
+        description: "simstudioai/sim ref to build from"
+        required: false
+        default: "main"
+      hive_app_ref:
+        description: "hive-app ref (memory sidecar source)"
+        required: false
+        default: "main"
+      paperclip_ref:
+        description: "this fork ref (Paperclip)"
+        required: false
+        default: "master"
+      push:
+        description: "push to ghcr on smoke pass"
+        type: boolean
+        default: true
+      push_latest:
+        description: "also move :latest"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/hiveos
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout fork (Paperclip + build context)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.paperclip_ref }}
+          path: fork
+
+      - name: Resolve hiveos version
+        id: ver
+        run: |
+          V="${{ inputs.version }}"
+          if [ -z "$V" ]; then V="$(tr -d ' \n' < fork/VERSION)"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "hiveos version = $V"
+
+      - name: Checkout Sim source (simstudioai/sim)
+        uses: actions/checkout@v4
+        with:
+          repository: simstudioai/sim
+          ref: ${{ inputs.sim_ref }}
+          path: fork/vendor/sim
+
+      - name: Checkout hive-app source (memory sidecar)
+        uses: actions/checkout@v4
+        with:
+          repository: adamboalt/hive-app
+          ref: ${{ inputs.hive_app_ref }}
+          token: ${{ secrets.HIVE_APP_RO_TOKEN }}
+          path: fork/vendor/hive-app
+
+      - name: Resolve exact component versions
+        id: refs
+        working-directory: fork
+        run: |
+          PAPERCLIP_REF="$(git rev-parse HEAD)"
+          SIM_REF="$(git -C vendor/sim rev-parse HEAD)"
+          MEMORY_REF="$(git -C vendor/hive-app rev-parse HEAD)"
+          HERMES_VERSION="$(curl -fsS https://pypi.org/pypi/hermes-agent/json | python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])')"
+          for kv in "paperclip_ref=$PAPERCLIP_REF" "sim_ref=$SIM_REF" "memory_ref=$MEMORY_REF" "hermes_version=$HERMES_VERSION"; do
+            echo "$kv" >> "$GITHUB_OUTPUT"
+          done
+          {
+            echo "### hiveos:${{ steps.ver.outputs.version }} — baked component versions"
+            echo ""
+            echo "| Engine | Pinned version |"
+            echo "|---|---|"
+            echo "| Paperclip (fork) | \`$PAPERCLIP_REF\` |"
+            echo "| Sim (embeddable, from source) | \`simstudioai/sim@$SIM_REF\` |"
+            echo "| Hermes | \`hermes-agent==$HERMES_VERSION\` |"
+            echo "| Memory (@hive/colony-sidecar) | \`hive-app@$MEMORY_REF\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply Sim embed overlay (handoff route + frame-ancestors)
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          mkdir -p vendor/sim/apps/sim/app/api/access/hive-handoff
+          cp hosting/sim-embeddable/hive-handoff-route.ts \
+             vendor/sim/apps/sim/app/api/access/hive-handoff/route.ts
+          cp hosting/sim-embeddable/hive-frame-ancestors.ts \
+             vendor/sim/apps/sim/hive-frame-ancestors.ts
+          node hosting/sim-embeddable/wire-next-config.mjs vendor/sim/apps/sim
+          echo "overlay applied:"
+          ls -la vendor/sim/apps/sim/app/api/access/hive-handoff/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build hiveos (load locally for smoke)
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.hiveos \
+            --build-context simsrc=vendor/sim \
+            --build-context hiveappsrc=vendor/hive-app \
+            --build-arg HIVEOS_VERSION=${{ steps.ver.outputs.version }} \
+            --build-arg PAPERCLIP_REF=${{ steps.refs.outputs.paperclip_ref }} \
+            --build-arg SIM_REF=${{ steps.refs.outputs.sim_ref }} \
+            --build-arg HERMES_VERSION=${{ steps.refs.outputs.hermes_version }} \
+            --build-arg MEMORY_REF=${{ steps.refs.outputs.memory_ref }} \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --platform linux/amd64 \
+            --load \
+            --tag hiveos:smoke \
+            .
+
+      - name: Smoke test — all four engines boot
+        run: |
+          set -uo pipefail
+          docker run -d --name hiveos-smoke \
+            -e BETTER_AUTH_SECRET=smoke-better-auth-secret-0000000000000000 \
+            -e HIVE_BOOTSTRAP_SECRET=smoke-bootstrap-secret-000000000000000 \
+            -e HIVE_PROXY_TOKEN=smoke-proxy-token-000000000000000000000 \
+            -e HIVE_SIM_HANDOFF_TOKEN=smoke-proxy-token-000000000000000000000 \
+            -p 3100:3100 -p 3000:3000 -p 3101:3101 \
+            hiveos:smoke
+          echo "waiting for engines to boot…"
+          ok_pc=0 ok_sim=0 ok_mem=0
+          for i in $(seq 1 60); do
+            sleep 5
+            if [ "$ok_pc" = 0 ] && curl -fsS -o /dev/null http://127.0.0.1:3100/api/health 2>/dev/null; then ok_pc=1; echo "[$i] Paperclip /api/health OK"; fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/access/hive-handoff 2>/dev/null || echo 000)
+            if [ "$ok_sim" = 0 ] && [ "$code" = "401" ]; then ok_sim=1; echo "[$i] Sim handoff = 401 (embeddable) OK"; fi
+            if [ "$ok_mem" = 0 ] && curl -fsS -o /dev/null http://127.0.0.1:3101/healthz 2>/dev/null; then ok_mem=1; echo "[$i] Memory /healthz OK"; fi
+            if [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ]; then break; fi
+          done
+          echo "=== Hermes engine ===" ; ok_herm=0
+          if docker exec hiveos-smoke sh -lc 'hermes --version || hermes --help' >/dev/null 2>&1; then ok_herm=1; echo "Hermes CLI OK"; fi
+          echo "--- container logs (tail) ---"; docker logs --tail 120 hiveos-smoke || true
+          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm"
+          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ]
+
+      - name: Push hiveos:<version> (+ latest) on smoke pass
+        if: ${{ inputs.push }}
+        run: |
+          set -euo pipefail
+          docker tag hiveos:smoke "${IMAGE}:${{ steps.ver.outputs.version }}"
+          docker push "${IMAGE}:${{ steps.ver.outputs.version }}"
+          if [ "${{ inputs.push_latest }}" = "true" ]; then
+            docker tag hiveos:smoke "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi
+          echo "pushed ${IMAGE}:${{ steps.ver.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f hiveos-smoke 2>/dev/null || true

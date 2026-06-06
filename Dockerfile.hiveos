@@ -1,0 +1,264 @@
+# syntax=docker/dockerfile:1.20
+# =============================================================================
+# hiveos — the consolidated "runs-everything" colony image.
+#
+# ONE image / ONE Fly machine, several processes:
+#   • Paperclip   (PID 1, :3100)  — agent orchestration engine (this fork)
+#   • Sim         (:3000 + :3002) — Workflows engine, FROM SOURCE + EMBEDDABLE
+#                                   (hive-handoff route + frame-ancestors)
+#   • Hermes      (CLI)           — CEO engine, spawned by Paperclip's adapter
+#   • Memory      (:3101)         — @hive/colony-sidecar, built from hive-app
+#
+# Built only by .github/workflows/hiveos-release.yml, which supplies the Sim
+# source as build-context `simsrc` (with the embed overlay pre-applied) and
+# the hive-app source as build-context `hiveappsrc`. Versions are stamped via
+# the *_REF / *_VERSION build args into OCI labels for reproducibility.
+# =============================================================================
+
+ARG HIVEOS_VERSION=0.0.0-dev
+ARG PAPERCLIP_REF=unknown
+ARG SIM_REF=unknown
+ARG HERMES_VERSION=0.16.0
+ARG MEMORY_REF=unknown
+
+# -----------------------------------------------------------------------------
+# Paperclip (this fork) — base + deps + build. Mirrors the fork's Dockerfile.
+# -----------------------------------------------------------------------------
+FROM node:lts-trixie-slim AS pc_base
+ARG USER_UID=1000
+ARG USER_GID=1000
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable
+RUN usermod -u $USER_UID --non-unique node \
+  && groupmod -g $USER_GID --non-unique node \
+  && usermod -g $USER_GID -d /paperclip node
+
+FROM pc_base AS pc_deps
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY cli/package.json cli/
+COPY server/package.json server/
+COPY ui/package.json ui/
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY packages/adapter-utils/package.json packages/adapter-utils/
+COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/adapters/acpx-local/package.json packages/adapters/acpx-local/
+COPY packages/adapters/claude-local/package.json packages/adapters/claude-local/
+COPY packages/adapters/codex-local/package.json packages/adapters/codex-local/
+COPY packages/adapters/cursor-local/package.json packages/adapters/cursor-local/
+COPY packages/adapters/gemini-local/package.json packages/adapters/gemini-local/
+COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
+COPY packages/adapters/opencode-local/package.json packages/adapters/opencode-local/
+COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
+COPY packages/plugins/sdk/package.json packages/plugins/sdk/
+COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plugins/sandbox-providers/
+COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
+COPY patches/ patches/
+RUN pnpm install --frozen-lockfile
+
+FROM pc_base AS pc_build
+WORKDIR /app
+COPY --from=pc_deps /app /app
+COPY . .
+RUN pnpm --filter @paperclipai/ui build
+RUN pnpm --filter @paperclipai/plugin-sdk build
+RUN pnpm --filter @paperclipai/server build
+RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+
+# -----------------------------------------------------------------------------
+# Sim APP — FROM SOURCE (build-context `simsrc`, overlay pre-applied).
+# Based on simstudioai/sim docker/app.Dockerfile.
+# -----------------------------------------------------------------------------
+FROM oven/bun:1.3.13-slim AS sim_base
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv make g++ curl ca-certificates bash ffmpeg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs
+
+FROM sim_base AS sim_pruner
+WORKDIR /app
+RUN bun install -g turbo@2.9.6
+COPY --from=simsrc . .
+RUN turbo prune sim --docker
+
+FROM sim_base AS sim_deps
+WORKDIR /app
+COPY --from=sim_pruner /app/out/json/ ./
+COPY --from=sim_pruner /app/bun.lock ./bun.lock
+RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
+    --mount=type=cache,id=npm-cache,target=/root/.npm \
+    HUSKY=0 bun install --ignore-scripts --linker=hoisted && \
+    cd node_modules/isolated-vm && JOBS=4 npx node-gyp rebuild --release
+
+FROM sim_base AS sim_build
+ARG TARGETPLATFORM
+WORKDIR /app
+COPY --from=sim_deps /app/node_modules ./node_modules
+COPY --from=sim_pruner /app/out/full/ ./
+COPY --from=sim_pruner /app/bun.lock ./bun.lock
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    VERCEL_TELEMETRY_DISABLED=1 \
+    DOCKER_BUILD=1
+ARG DATABASE_URL="postgresql://user:pass@localhost:5432/dummy"
+ENV DATABASE_URL=${DATABASE_URL}
+ARG NEXT_PUBLIC_APP_URL="http://localhost:3000"
+ENV NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
+RUN --mount=type=cache,id=next-cache-${TARGETPLATFORM},target=/app/apps/sim/.next/cache \
+    --mount=type=cache,id=turbo-cache-${TARGETPLATFORM},target=/app/.turbo \
+    bun run build
+
+# -----------------------------------------------------------------------------
+# Sim REALTIME — FROM SOURCE. Based on simstudioai/sim docker/realtime.Dockerfile.
+# -----------------------------------------------------------------------------
+FROM oven/bun:1.3.13-alpine AS rt_base
+RUN apk add --no-cache libc6-compat curl
+
+FROM rt_base AS rt_pruner
+WORKDIR /app
+RUN bun add -g turbo
+COPY --from=simsrc . .
+RUN turbo prune @sim/realtime --docker
+
+FROM rt_base AS rt_deps
+WORKDIR /app
+COPY --from=rt_pruner /app/out/json/ ./
+COPY --from=rt_pruner /app/out/bun.lock ./bun.lock
+RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
+    bun install --linker=hoisted --omit=dev --ignore-scripts
+
+FROM rt_base AS rt_build
+WORKDIR /app
+COPY --from=rt_deps /app ./
+COPY --from=rt_pruner /app/out/full/ ./
+
+# -----------------------------------------------------------------------------
+# Sim MIGRATIONS — FROM SOURCE. Based on simstudioai/sim docker/db.Dockerfile.
+# -----------------------------------------------------------------------------
+FROM rt_base AS mig_deps
+WORKDIR /app
+COPY --from=simsrc package.json bun.lock turbo.json ./
+RUN mkdir -p packages/db packages/tsconfig packages/utils
+COPY --from=simsrc packages/db/package.json ./packages/db/package.json
+COPY --from=simsrc packages/tsconfig/package.json ./packages/tsconfig/package.json
+COPY --from=simsrc packages/utils/package.json ./packages/utils/package.json
+RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
+    bun install --ignore-scripts
+
+FROM rt_base AS mig_build
+WORKDIR /app
+COPY --from=mig_deps /app/node_modules ./node_modules
+COPY --from=simsrc package.json ./package.json
+COPY --from=simsrc packages/tsconfig ./packages/tsconfig
+COPY --from=simsrc packages/utils ./packages/utils
+COPY --from=simsrc packages/db ./packages/db
+
+# -----------------------------------------------------------------------------
+# Memory sidecar — FROM SOURCE (build-context `hiveappsrc`).
+# Based on hive-app packages/colony-sidecar/Dockerfile.
+# -----------------------------------------------------------------------------
+FROM node:22-alpine AS sidecar_build
+WORKDIR /build
+COPY --from=hiveappsrc package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --from=hiveappsrc packages/colony-sidecar/package.json ./packages/colony-sidecar/
+COPY --from=hiveappsrc packages/colony-db/package.json ./packages/colony-db/
+RUN npm install -g pnpm@10.32.1 \
+  && pnpm install --frozen-lockfile --ignore-scripts \
+     --filter @hive/colony-sidecar --filter @hive/colony-db
+COPY --from=hiveappsrc packages/colony-sidecar ./packages/colony-sidecar
+COPY --from=hiveappsrc packages/colony-db ./packages/colony-db
+RUN pnpm --filter @hive/colony-sidecar build
+
+# -----------------------------------------------------------------------------
+# Production — assemble all four engines into the colony runtime.
+# -----------------------------------------------------------------------------
+FROM pc_base AS production
+ARG USER_UID=1000
+ARG USER_GID=1000
+ARG HIVEOS_VERSION
+ARG PAPERCLIP_REF
+ARG SIM_REF
+ARG HERMES_VERSION
+ARG MEMORY_REF
+WORKDIR /app
+COPY --chown=node:node --from=pc_build /app /app
+RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends openssh-client jq \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /paperclip \
+  && chown node:node /paperclip
+
+# pgvector Postgres 17 + Sim/Hermes runtime deps.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg python3-pip python3-venv gnupg postgresql-common \
+  && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+  && apt-get install -y --no-install-recommends postgresql-17 postgresql-17-pgvector postgresql-client-17 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Hermes CEO engine — newest from PyPI, pinned by the workflow.
+RUN pip3 install --no-cache-dir --break-system-packages "hermes-agent==${HERMES_VERSION}"
+
+# Sim runtime: one glibc `bun` from the Sim build image runs app + realtime.
+COPY --from=sim_base /usr/local/bin/bun /usr/local/bin/bun
+
+# Sim app (from-source standalone) -> /opt/hive-sim
+COPY --from=sim_build --chown=node:node /app/apps/sim/.next/standalone /opt/hive-sim
+COPY --from=sim_build --chown=node:node /app/apps/sim/.next/static /opt/hive-sim/apps/sim/.next/static
+COPY --from=sim_build --chown=node:node /app/apps/sim/public /opt/hive-sim/apps/sim/public
+COPY --from=sim_build --chown=node:node /app/apps/sim/content /opt/hive-sim/apps/sim/content
+COPY --from=sim_deps --chown=node:node /app/node_modules/isolated-vm /opt/hive-sim/node_modules/isolated-vm
+
+# Sim realtime (from-source) -> /opt/hive-realtime
+COPY --from=rt_build --chown=node:node /app /opt/hive-realtime
+
+# Sim migrations (from-source) -> /opt/hive-sim-migrations
+COPY --from=mig_build --chown=node:node /app /opt/hive-sim-migrations
+
+# Memory sidecar (from-source) -> /opt/hive-colony-sidecar
+COPY --from=sidecar_build --chown=node:node /build/node_modules /opt/hive-colony-sidecar/node_modules
+COPY --from=sidecar_build --chown=node:node /build/packages/colony-sidecar/dist /opt/hive-colony-sidecar/packages/colony-sidecar/dist
+COPY --from=sidecar_build --chown=node:node /build/packages/colony-sidecar/package.json /opt/hive-colony-sidecar/packages/colony-sidecar/
+COPY --from=sidecar_build --chown=node:node /build/packages/colony-db /opt/hive-colony-sidecar/packages/colony-db
+COPY --from=sidecar_build --chown=node:node /build/package.json /opt/hive-colony-sidecar/
+
+COPY scripts/docker-entrypoint.sh scripts/hiveos-engines.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/hiveos-engines.sh \
+  && ln -sf /usr/local/bin/hiveos-engines.sh /usr/local/bin/hive-engines.sh
+
+ENV NODE_ENV=production \
+  HOME=/paperclip \
+  HOST=0.0.0.0 \
+  PORT=3100 \
+  SERVE_UI=true \
+  PAPERCLIP_HOME=/paperclip \
+  PAPERCLIP_INSTANCE_ID=default \
+  PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
+  PAPERCLIP_DEPLOYMENT_MODE=authenticated \
+  PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
+  OPENCODE_ALLOW_ALL_MODELS=true \
+  SIM_SERVE_UI=true \
+  npm_config_cache=/tmp/npm-cache \
+  NPM_CONFIG_CACHE=/tmp/npm-cache \
+  NPM_CONFIG_PREFER_OFFLINE=true \
+  PNPM_HOME=/tmp/pnpm-home \
+  XDG_CACHE_HOME=/tmp/cache
+
+LABEL org.opencontainers.image.title="hiveos" \
+      org.opencontainers.image.description="Hive consolidated colony image: Paperclip + embeddable Sim + Hermes + Memory" \
+      co.agenthive.hiveos.version="${HIVEOS_VERSION}" \
+      co.agenthive.hiveos.paperclip.ref="${PAPERCLIP_REF}" \
+      co.agenthive.hiveos.sim.ref="${SIM_REF}" \
+      co.agenthive.hiveos.hermes.version="${HERMES_VERSION}" \
+      co.agenthive.hiveos.memory.ref="${MEMORY_REF}"
+
+VOLUME ["/paperclip"]
+# 3100 Paperclip · 3000 Sim app · 3002 Sim realtime · 3101 memory sidecar
+EXPOSE 3100 3000 3002 3101
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
