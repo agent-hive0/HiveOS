@@ -45,7 +45,9 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Large GitHub-hosted runner (8-vcpu/32 GB-class, agent-hive0 org) — the
+    # 4-engine build (Sim from source) OOM-killed the 7 GB standard runner.
+    runs-on: hiveos-builder
     timeout-minutes: 120
     steps:
       - name: Checkout fork (Paperclip + build context)
