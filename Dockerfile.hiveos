@@ -61,6 +61,9 @@ RUN pnpm install --frozen-lockfile
 
 FROM pc_base AS pc_build
 WORKDIR /app
+# Cap Node heap so the parallel builds on the standard CI runner don't balloon
+# past available RAM (OOM fix; pairs with the workflow swapfile).
+ENV NODE_OPTIONS=--max-old-space-size=3072
 COPY --from=pc_deps /app /app
 COPY . .
 RUN pnpm --filter @paperclipai/ui build
@@ -93,7 +96,7 @@ COPY --from=sim_pruner /app/bun.lock ./bun.lock
 RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
     --mount=type=cache,id=npm-cache,target=/root/.npm \
     HUSKY=0 bun install --ignore-scripts --linker=hoisted && \
-    cd node_modules/isolated-vm && JOBS=4 npx node-gyp rebuild --release
+    cd node_modules/isolated-vm && JOBS=2 npx node-gyp rebuild --release
 
 FROM sim_base AS sim_build
 ARG TARGETPLATFORM
@@ -103,7 +106,8 @@ COPY --from=sim_pruner /app/out/full/ ./
 COPY --from=sim_pruner /app/bun.lock ./bun.lock
 ENV NEXT_TELEMETRY_DISABLED=1 \
     VERCEL_TELEMETRY_DISABLED=1 \
-    DOCKER_BUILD=1
+    DOCKER_BUILD=1 \
+    NODE_OPTIONS=--max-old-space-size=3072
 ARG DATABASE_URL="postgresql://user:pass@localhost:5432/dummy"
 ENV DATABASE_URL=${DATABASE_URL}
 ARG NEXT_PUBLIC_APP_URL="http://localhost:3000"
@@ -163,6 +167,7 @@ COPY --from=simsrc packages/db ./packages/db
 # -----------------------------------------------------------------------------
 FROM node:22-alpine AS sidecar_build
 WORKDIR /build
+ENV NODE_OPTIONS=--max-old-space-size=3072
 COPY --from=hiveappsrc package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY --from=hiveappsrc packages/colony-sidecar/package.json ./packages/colony-sidecar/
 COPY --from=hiveappsrc packages/colony-db/package.json ./packages/colony-db/

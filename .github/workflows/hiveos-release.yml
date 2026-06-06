@@ -141,8 +141,34 @@ jobs:
           docker system prune -af --volumes || true
           echo "== after =="; df -h / || true
 
+      # The 4-engine build (Sim is compiled from source) overflows the 7 GB RAM
+      # on the 2-CPU standard runner -> OOM kill with no flushed logs (~65 min
+      # in). No larger runner label is available to this org, so we add a large
+      # swapfile on the big ephemeral disk (~47 G free after reclaim) to absorb
+      # the peak. Primary OOM fix; pairs with capped Node heaps + bounded
+      # BuildKit parallelism below.
+      - name: Add swap (survive OOM on standard runner)
+        run: |
+          set -uo pipefail
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          sudo fallocate -l 16G /mnt/swapfile \
+            || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo sysctl vm.swappiness=80
+          echo "== memory after adding swap =="; free -h
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # Cap concurrent build stages so the parallel heavy stages (Sim
+          # `next build`, Paperclip pnpm builds, sidecar build, native compiles)
+          # don't all peak at once and exhaust RAM.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -155,6 +181,19 @@ jobs:
         working-directory: fork
         run: |
           set -euo pipefail
+
+          # Live memory trace so a future OOM isn't blind. Logs RAM + swap every
+          # 30s into the step output; killed on EXIT.
+          mem_monitor() {
+            while true; do
+              echo "[mem $(date -u +%H:%M:%S)] $(free -m | sed -n 2p) | swap: $(free -m | sed -n 3p)"
+              sleep 30
+            done
+          }
+          mem_monitor &
+          MON_PID=$!
+          trap 'kill "$MON_PID" 2>/dev/null || true' EXIT
+
           docker buildx build \
             --file Dockerfile.hiveos \
             --build-context simsrc=vendor/sim \
@@ -170,6 +209,8 @@ jobs:
             --load \
             --tag hiveos:smoke \
             .
+
+          echo "== memory after build =="; free -h
 
       - name: Smoke test — all four engines boot
         run: |
