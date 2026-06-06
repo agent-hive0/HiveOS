@@ -182,7 +182,18 @@ RUN npm install -g pnpm@10.32.1 \
      --filter @hive/colony-sidecar --filter @hive/colony-db
 COPY --from=hiveappsrc packages/colony-sidecar ./packages/colony-sidecar
 COPY --from=hiveappsrc packages/colony-db ./packages/colony-db
-RUN pnpm --filter @hive/colony-sidecar build
+# Bundle the sidecar into one self-contained ESM file. The tsc dist is NOT
+# runnable by plain Node: the package is "type": "module" but built with
+# moduleResolution=bundler, so its relative imports are extensionless
+# (`./server`), and it depends on @hive/colony-db whose package `exports` point
+# at raw .ts source. esbuild resolves both (and inlines colony-db's migration
+# loader); `pg` stays external and is resolved from the hoisted node_modules
+# baked into the image.
+RUN pnpm --filter @hive/colony-sidecar build \
+  && npx --yes esbuild@0.25.10 packages/colony-sidecar/src/cli.ts \
+       --bundle --platform=node --format=esm --target=node22 \
+       --external:pg \
+       --outfile=packages/colony-sidecar/dist/cli.js
 
 # -----------------------------------------------------------------------------
 # Production — assemble all four engines into the colony runtime.
@@ -235,6 +246,11 @@ COPY --from=sidecar_build --chown=node:node /build/node_modules /opt/hive-colony
 COPY --from=sidecar_build --chown=node:node /build/packages/colony-sidecar/dist /opt/hive-colony-sidecar/packages/colony-sidecar/dist
 COPY --from=sidecar_build --chown=node:node /build/packages/colony-sidecar/package.json /opt/hive-colony-sidecar/packages/colony-sidecar/
 COPY --from=sidecar_build --chown=node:node /build/packages/colony-db /opt/hive-colony-sidecar/packages/colony-db
+# The bundled sidecar resolves its SQL migrations via import.meta.url relative
+# to the bundle (dist/../migrations), so the files must sit beside dist/. They
+# also live under colony-db (used by the eager boot-migration in
+# hiveos-engines.sh).
+COPY --from=sidecar_build --chown=node:node /build/packages/colony-db/migrations /opt/hive-colony-sidecar/packages/colony-sidecar/migrations
 COPY --from=sidecar_build --chown=node:node /build/package.json /opt/hive-colony-sidecar/
 
 COPY scripts/docker-entrypoint.sh scripts/hiveos-engines.sh /usr/local/bin/

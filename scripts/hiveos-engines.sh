@@ -97,6 +97,24 @@ done
 SIM_DB_URL="postgresql://$PG_SUPERUSER@$PG_HOST:$PG_PORT/sim"
 HIVE_APP_DB_URL="postgresql://$PG_SUPERUSER@$PG_HOST:$PG_PORT/hive_app"
 
+# Apply Hive's hive_app schema migrations eagerly at boot. The memory sidecar's
+# /healthz only returns 200 once the `hive_app` SCHEMA exists, but the sidecar
+# otherwise creates it lazily on the first /memory request — which deadlocks
+# against any healthcheck that gates traffic on /healthz (Fly, and the release
+# smoke test). The SQL is idempotent (IF NOT EXISTS / OR REPLACE), so running it
+# every boot is safe.
+HIVE_APP_MIGRATIONS_DIR="$SIDECAR_DIR/packages/colony-db/migrations"
+if [ -d "$HIVE_APP_MIGRATIONS_DIR" ]; then
+    log "applying hive_app schema migrations"
+    for mig in "$HIVE_APP_MIGRATIONS_DIR"/*.sql; do
+        [ -f "$mig" ] || continue
+        psql_super -d hive_app -v ON_ERROR_STOP=1 -f "$mig" >/dev/null 2>&1 \
+            || log "WARN hive_app migration $(basename "$mig") failed"
+    done
+else
+    log "WARN hive_app migrations dir missing — sidecar /healthz may stay 503"
+fi
+
 # --- 3. Sim migrations (blocking, non-fatal) -------------------------------
 if [ -d "$SIM_MIGRATIONS_DIR/packages/db" ]; then
     log "running Sim migrations"
