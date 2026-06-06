@@ -72,7 +72,7 @@ jobs:
       - name: Checkout hive-app source (memory sidecar)
         uses: actions/checkout@v4
         with:
-          repository: adamboalt/hive-app
+          repository: agent-hive0/hive-app
           ref: ${{ inputs.hive_app_ref }}
           token: ${{ secrets.HIVE_APP_RO_TOKEN }}
           path: fork/vendor/hive-app
@@ -111,6 +111,35 @@ jobs:
           node hosting/sim-embeddable/wire-next-config.mjs vendor/sim/apps/sim
           echo "overlay applied:"
           ls -la vendor/sim/apps/sim/app/api/access/hive-handoff/
+
+      # The multi-engine build (Paperclip + Sim-from-source + Hermes + Memory)
+      # overflows the stock ~14 GB free on ubuntu-latest -> "No space left on
+      # device". Reclaim ~25-30 GB of preinstalled toolchains/images we never
+      # use before buildx writes layers. (No larger GitHub-hosted runner label
+      # is configured for this org, so we stay on ubuntu-latest and rely on
+      # this reclaim; bump runs-on if/when a larger runner is provisioned.)
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Extra disk reclaim (caches + tool dirs)
+        run: |
+          set -uo pipefail
+          echo "== before =="; df -h / || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean || true
+          docker builder prune -af || true
+          docker system prune -af --volumes || true
+          echo "== after =="; df -h / || true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
