@@ -238,6 +238,7 @@ jobs:
             -e SIM_API_KEY=sk-sim-smoke000000000000000000000000000000000000 \
             -e HIVE_SIM_SEED_API_KEY=1 \
             -e SIM_WORKSPACE_ID=hive \
+            -e SIM_FRAME_ANCESTORS="https://agenthive.co https://*.agenthive.co" \
             -p 3100:3100 -p 3000:3000 -p 3101:3101 \
             hiveos:smoke
           echo "waiting for engines to boot…"
@@ -279,11 +280,30 @@ jobs:
             echo "--- HiveSeedKey route logs ---"
             docker logs hiveos-smoke 2>&1 | grep -iE "hive-seed-key|HiveSeedKey|api-key seed" | tail -20 || true
           fi
+          # Never-show-login guard (embed mode is ON via SIM_FRAME_ANCESTORS). An
+          # unauthenticated GET /login MUST cleanly 302 into the authenticated
+          # handoff — NOT 500 (the middleware-adapter crash we just fixed) and NOT
+          # Sim's own login form. This is the exact colony0 regression, so gate on it.
+          echo "=== Embed never-show-login guard check ===" ; ok_guard=0
+          for i in $(seq 1 18); do
+            gcode=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/login" 2>/dev/null || echo 000)
+            gloc=$(curl -s -D - -o /dev/null "http://127.0.0.1:3000/login" 2>/dev/null | tr -d '\r' | grep -i '^location:' | head -1)
+            if [ "$gcode" = "302" ] && printf '%s' "$gloc" | grep -q '/api/access/hive-handoff'; then
+              ok_guard=1; echo "[$i] GET /login (embed) -> 302 into hive-handoff OK ($gloc)"; break
+            fi
+            echo "[$i] /login not guarding yet (code=$gcode loc=${gloc:-none})…"; sleep 5
+          done
+          if [ "$ok_guard" = 0 ]; then
+            echo "--- /login response headers (last) ---"
+            curl -s -D - -o /dev/null "http://127.0.0.1:3000/login" 2>/dev/null | tr -d '\r' || true
+            echo "--- proxy / hive-embed guard logs ---"
+            docker logs hiveos-smoke 2>&1 | grep -iE "hive-embed|Proxy" | tail -30 || true
+          fi
           echo "=== Hermes engine ===" ; ok_herm=0
           if docker exec hiveos-smoke sh -lc 'hermes --version || hermes --help' >/dev/null 2>&1; then ok_herm=1; echo "Hermes CLI OK"; fi
           echo "--- container logs (tail) ---"; docker logs --tail 120 hiveos-smoke || true
-          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie seed=$ok_seed"
-          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ] && [ "$ok_seed" = 1 ]
+          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie seed=$ok_seed guard=$ok_guard"
+          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ] && [ "$ok_seed" = 1 ] && [ "$ok_guard" = 1 ]
 
       - name: Push hiveos:<version> (+ latest) on smoke pass
         if: ${{ inputs.push }}

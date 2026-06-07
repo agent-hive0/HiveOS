@@ -198,6 +198,10 @@ function hiveFrameAncestorsCspValue(): string {
 }
 
 function isHiveGuardedPath(pathname: string): boolean {
+  // Never guard API routes — especially /api/access/* (the handoff itself). The
+  // middleware already returns early for /api/*, but assert it here too so the
+  // guard can never bounce the handoff route back through itself (redirect loop).
+  if (pathname.startsWith('/api/')) return false
   return (
     pathname === '/' ||
     pathname === '/login' ||
@@ -248,6 +252,31 @@ function hiveReconnectingResponse(): NextResponse {
   })
 }
 
+// ${MARKER} The PUBLIC colony origin, reconstructed from the inbound proxy
+// headers. A middleware redirect MUST carry an ABSOLUTE, parseable Location:
+// Next's middleware adapter runs \`new NextURL(location)\` on whatever Location we
+// set, and a RELATIVE path throws \`TypeError: Invalid URL\` there -> the request
+// 500s (the bug this guard had). We must NOT build the absolute URL from
+// request.nextUrl.origin: behind Fly's proxy that resolves to the internal bind
+// host (https://0.0.0.0:3000), unreachable from the browser. The Host /
+// X-Forwarded-* headers carry the real public origin the customer is on, so the
+// redirect lands back on the same public colony host (effectively relative).
+function hivePublicOrigin(request: NextRequest): string {
+  const first = (v: string | null): string => (v ? v.split(',')[0].trim() : '')
+  const host =
+    first(request.headers.get('x-forwarded-host')) ||
+    first(request.headers.get('host')) ||
+    request.nextUrl.host
+  const proto =
+    first(request.headers.get('x-forwarded-proto')) ||
+    (request.nextUrl.protocol ? request.nextUrl.protocol.replace(':', '') : 'https')
+  return proto + '://' + host
+}
+
+function isHiveAuthRoute(pathname: string): boolean {
+  return pathname === '/login' || pathname === '/signup'
+}
+
 function applyHiveEmbedLoginGuard(
   request: NextRequest,
   hasActiveSession: boolean,
@@ -256,30 +285,50 @@ function applyHiveEmbedLoginGuard(
   const url = request.nextUrl
   if (!isHiveGuardedPath(url.pathname)) return null
 
-  // Already round-tripped through the handoff and still unauthenticated: the
-  // session cookie didn't stick. Show the Hive reconnect page — NEVER Sim login.
-  if (url.searchParams.has(HIVE_EMBED_MARKER)) {
-    return hiveReconnectingResponse()
+  // Wrap everything: this guard must NEVER 500 and never fall through to Sim's
+  // own login/signup form. On any unexpected error we log loudly (no live logs
+  // otherwise) and show the Hive reconnect page on the auth routes.
+  try {
+    // Already round-tripped through the handoff and still unauthenticated: the
+    // session cookie didn't stick. Show the Hive reconnect page — NEVER Sim login.
+    if (url.searchParams.has(HIVE_EMBED_MARKER)) {
+      return hiveReconnectingResponse()
+    }
+
+    const token = hiveHandoffToken()
+    if (!token) {
+      // No handoff token configured — can't mint, so don't loop. Still never
+      // render Sim's form on the auth routes; show the reconnect page instead.
+      logger.error('[hive-embed] login guard: no handoff token configured', {
+        path: url.pathname,
+      })
+      return isHiveAuthRoute(url.pathname) ? hiveReconnectingResponse() : null
+    }
+
+    // Return target carries the one-shot marker so the next pass detects a failed
+    // mint instead of looping forever.
+    const sep = url.search ? '&' : '?'
+    const to = url.pathname + url.search + sep + HIVE_EMBED_MARKER + '=1'
+    // ABSOLUTE Location against the PUBLIC origin (see hivePublicOrigin). A
+    // relative Location here crashes Next's middleware adapter (-> 500).
+    const loc =
+      hivePublicOrigin(request) +
+      HIVE_EMBED_HANDOFF_PATH +
+      '?token=' +
+      encodeURIComponent(token) +
+      '&to=' +
+      encodeURIComponent(to)
+    const res = new NextResponse(null, { status: 302 })
+    res.headers.set('Location', loc)
+    res.headers.set('Cache-Control', 'no-store')
+    return res
+  } catch (err) {
+    logger.error('[hive-embed] login guard threw; serving reconnect page', {
+      path: url.pathname,
+      err: String(err),
+    })
+    return isHiveAuthRoute(url.pathname) ? hiveReconnectingResponse() : null
   }
-
-  const token = hiveHandoffToken()
-  if (!token) return null // no handoff token configured — can't mint; don't loop
-
-  // Return target carries the one-shot marker so the next pass detects a failed
-  // mint instead of looping forever. Location is RELATIVE so it resolves against
-  // the browser's public colony origin (not Fly's internal bind host).
-  const sep = url.search ? '&' : '?'
-  const to = url.pathname + url.search + sep + HIVE_EMBED_MARKER + '=1'
-  const loc =
-    HIVE_EMBED_HANDOFF_PATH +
-    '?token=' +
-    encodeURIComponent(token) +
-    '&to=' +
-    encodeURIComponent(to)
-  const res = new NextResponse(null, { status: 302 })
-  res.headers.set('Location', loc)
-  res.headers.set('Cache-Control', 'no-store')
-  return res
 }
 `,
       'proxy.ts logger',
