@@ -45,9 +45,12 @@ env:
 
 jobs:
   build:
-    # Large GitHub-hosted runner (8-vcpu/32 GB-class, agent-hive0 org) — the
-    # 4-engine build (Sim from source) OOM-killed the 7 GB standard runner.
-    runs-on: hiveos-builder
+    # Public repo → ubuntu-latest is a 4-vcpu/16 GB standard runner. The
+    # hiveos-builder larger runner stalls (jobs queue indefinitely despite
+    # showing "Ready"), so we run on the standard runner and rely on the disk
+    # reclaim + 16 GB swapfile below (16 GB RAM + 16 GB swap absorbs the
+    # 4-engine Sim-from-source build that OOM-killed the old 7 GB private runner).
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Checkout fork (Paperclip + build context)
