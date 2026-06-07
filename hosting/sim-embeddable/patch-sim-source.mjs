@@ -171,8 +171,135 @@ function applyHiveFrameOptions(response: NextResponse): void {
   if ((getEnv('SIM_FRAME_ANCESTORS') ?? '').trim().length > 0) return
   response.headers.set('X-Frame-Options', 'SAMEORIGIN')
 }
+
+// ${MARKER} Hive hosting overlay: NEVER let Sim's own /login or /signup render
+// inside the Hive embed. When embedding is enabled (SIM_FRAME_ANCESTORS set) and
+// an unauthenticated request hits a canvas/auth route (/, /w/*, /workspace/*,
+// /login, /signup), bounce ONCE through the colony's authenticated handoff
+// (/api/access/hive-handoff, which mints a Sim session cookie) and come back. The
+// one-shot _hs marker rides on the return target, so if the session STILL isn't
+// present after the round-trip (e.g. the cross-site cookie was blocked) we render
+// a minimal Hive "Reconnecting…" page instead of Sim's email/password form.
+// Unset SIM_FRAME_ANCESTORS => inert (stock Sim auth behavior).
+const HIVE_EMBED_HANDOFF_PATH = '/api/access/hive-handoff'
+const HIVE_EMBED_MARKER = '_hs'
+
+function hiveEmbedEnabled(): boolean {
+  return (getEnv('SIM_FRAME_ANCESTORS') ?? '').trim().length > 0
+}
+
+function hiveHandoffToken(): string {
+  return (getEnv('HIVE_SIM_HANDOFF_TOKEN') ?? getEnv('HIVE_PROXY_TOKEN') ?? '').trim()
+}
+
+function hiveFrameAncestorsCspValue(): string {
+  const extra = (getEnv('SIM_FRAME_ANCESTORS') ?? '').trim()
+  return extra.length > 0 ? "frame-ancestors 'self' " + extra : "frame-ancestors 'self'"
+}
+
+function isHiveGuardedPath(pathname: string): boolean {
+  return (
+    pathname === '/' ||
+    pathname === '/login' ||
+    pathname === '/signup' ||
+    pathname === '/w' ||
+    pathname.startsWith('/w/') ||
+    pathname === '/workspace' ||
+    pathname.startsWith('/workspace/')
+  )
+}
+
+function hiveReconnectingHtml(): string {
+  return "<!doctype html><html lang='en'><head>" +
+    "<meta charset='utf-8'>" +
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
+    "<title>Reconnecting</title>" +
+    "<style>html,body{height:100%;margin:0}" +
+    "body{display:flex;align-items:center;justify-content:center;" +
+    "font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;" +
+    "background:#0b0b0f;color:#e9e9ee}" +
+    ".card{text-align:center;max-width:24rem;padding:2rem}" +
+    ".dot{width:.5rem;height:.5rem;border-radius:9999px;background:#f5b301;" +
+    "display:inline-block;margin:0 .18rem;animation:hb 1s infinite ease-in-out}" +
+    ".dot:nth-child(2){animation-delay:.15s}.dot:nth-child(3){animation-delay:.3s}" +
+    "@keyframes hb{0%,80%,100%{opacity:.25}40%{opacity:1}}" +
+    "h1{font-size:1.05rem;font-weight:600;margin:1rem 0 .35rem}" +
+    "p{font-size:.85rem;color:#a8a8b3;margin:0}" +
+    "a{color:#f5b301;font-size:.8rem;text-decoration:none}</style></head>" +
+    "<body><div class='card'>" +
+    "<div><span class='dot'></span><span class='dot'></span><span class='dot'></span></div>" +
+    "<h1>Reconnecting your workspace...</h1>" +
+    "<p>Securing your session. This page refreshes automatically.</p>" +
+    "<p style='margin-top:1rem'><a href='/'>Try again</a></p>" +
+    "</div>" +
+    "<script>try{if(!sessionStorage.getItem('hiveReconnectTried')){sessionStorage.setItem('hiveReconnectTried','1');setTimeout(function(){location.replace('/')},3000)}}catch(e){}</script>" +
+    "</body></html>"
+}
+
+function hiveReconnectingResponse(): NextResponse {
+  return new NextResponse(hiveReconnectingHtml(), {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': hiveFrameAncestorsCspValue(),
+      'X-Frame-Options': 'ALLOWALL',
+    },
+  })
+}
+
+function applyHiveEmbedLoginGuard(
+  request: NextRequest,
+  hasActiveSession: boolean,
+): NextResponse | null {
+  if (!hiveEmbedEnabled() || hasActiveSession) return null
+  const url = request.nextUrl
+  if (!isHiveGuardedPath(url.pathname)) return null
+
+  // Already round-tripped through the handoff and still unauthenticated: the
+  // session cookie didn't stick. Show the Hive reconnect page — NEVER Sim login.
+  if (url.searchParams.has(HIVE_EMBED_MARKER)) {
+    return hiveReconnectingResponse()
+  }
+
+  const token = hiveHandoffToken()
+  if (!token) return null // no handoff token configured — can't mint; don't loop
+
+  // Return target carries the one-shot marker so the next pass detects a failed
+  // mint instead of looping forever. Location is RELATIVE so it resolves against
+  // the browser's public colony origin (not Fly's internal bind host).
+  const sep = url.search ? '&' : '?'
+  const to = url.pathname + url.search + sep + HIVE_EMBED_MARKER + '=1'
+  const loc =
+    HIVE_EMBED_HANDOFF_PATH +
+    '?token=' +
+    encodeURIComponent(token) +
+    '&to=' +
+    encodeURIComponent(to)
+  const res = new NextResponse(null, { status: 302 })
+  res.headers.set('Location', loc)
+  res.headers.set('Cache-Control', 'no-store')
+  return res
+}
 `,
       'proxy.ts logger',
+    )
+
+    // Run the never-show-login guard right after the session check, before any
+    // stock redirect can send the embedded iframe to Sim's /login.
+    const sessionAnchor =
+      '  const hasActiveSession = isAuthDisabled || !!sessionCookie\n'
+    src = replaceOnce(
+      src,
+      sessionAnchor,
+      sessionAnchor +
+        `
+  // ${MARKER} Hive embed: bounce unauthenticated canvas/auth routes through the
+  // authenticated handoff (or show the Hive reconnect page) — never Sim's login.
+  const hiveLoginGuard = applyHiveEmbedLoginGuard(request, hasActiveSession)
+  if (hiveLoginGuard) return track(request, hiveLoginGuard)
+`,
+      'proxy.ts session guard call',
     )
 
     writeFileSync(p, src)
