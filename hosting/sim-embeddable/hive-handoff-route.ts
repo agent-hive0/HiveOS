@@ -102,15 +102,18 @@ function presentedToken(req: NextRequest): string | null {
 
 /**
  * The colony's single Sim user. The colony is single-tenant (one workspace
- * per Fly machine), so all Hive handoffs resolve to one stable Sim account
- * derived from the colony host. NOTE: this is a fresh address (`sim-ceo@`)
- * distinct from any user an earlier handoff build may have created WITHOUT a
- * credential account — so `signUpEmail` always succeeds on first use and
- * `signInEmail` thereafter, instead of deadlocking on a credential-less user.
+ * per Fly machine) with its OWN isolated Sim DB, so all Hive handoffs resolve
+ * to one stable Sim account — a FIXED, format-valid service address.
+ *
+ * It must be a real-looking email: better-auth's signIn/signUp reject
+ * IP-literal or TLD-less domains with `INVALID_EMAIL` (e.g. a host-derived
+ * `sim-ceo@127.0.0.1` or `sim-ceo@<container-id>`), which silently breaks the
+ * mint. A constant also means the account survives a colony hostname change
+ * instead of being orphaned. Overridable via SIM_HANDOFF_USER_EMAIL.
  */
-function colonyUserEmail(req: NextRequest): string {
-  const host = (process.env.SIM_COLONY_HOST ?? req.nextUrl.hostname ?? "colony").toLowerCase();
-  return `sim-ceo@${host}`;
+function colonyUserEmail(_req: NextRequest): string {
+  const override = (process.env.SIM_HANDOFF_USER_EMAIL ?? "").trim();
+  return override !== "" ? override.toLowerCase() : "sim-ceo@colony.agenthive.co";
 }
 
 /**
