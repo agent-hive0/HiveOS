@@ -252,7 +252,11 @@ jobs:
             if printf '%s' "$hdrs" | grep -iq '^set-cookie:'; then ok_cookie=1; echo "[$i] handoff valid-token sets a session cookie OK"; break; fi
             echo "[$i] no Set-Cookie yet (Sim DB may still be migrating)…"; sleep 5
           done
-          if [ "$ok_cookie" = 0 ]; then echo "--- handoff response headers (last) ---"; printf '%s\n' "$hdrs"; fi
+          if [ "$ok_cookie" = 0 ]; then
+            echo "--- handoff response headers (last) ---"; printf '%s\n' "$hdrs"
+            echo "--- HiveHandoff route logs (why the mint failed) ---"
+            docker logs hiveos-smoke 2>&1 | grep -iE "hive-handoff|HiveHandoff" | tail -30 || true
+          fi
           echo "=== Hermes engine ===" ; ok_herm=0
           if docker exec hiveos-smoke sh -lc 'hermes --version || hermes --help' >/dev/null 2>&1; then ok_herm=1; echo "Hermes CLI OK"; fi
           echo "--- container logs (tail) ---"; docker logs --tail 120 hiveos-smoke || true

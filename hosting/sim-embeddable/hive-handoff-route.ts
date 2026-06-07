@@ -25,15 +25,19 @@
  * itself.
  *
  * SESSION MINT (the one Sim-version-specific seam). We mint via better-auth's
- * PUBLIC server API — `auth.api.signInEmail` / `signUpEmail` with
- * `asResponse: true` — and forward the resulting `Set-Cookie` headers onto
- * our redirect. This keeps cookie name / signing / SameSite in lockstep with
- * the running better-auth version (1.6.x) instead of re-implementing its
- * cookie crypto. The cross-site `SameSite=None; Secure; Partitioned`
- * attributes come from the `auth.ts` overlay (patch-sim-source.mjs #4), which
- * applies them whenever SIM_FRAME_ANCESTORS is set. A handoff that fails to
- * produce a Set-Cookie returns 500 (LOUD) rather than a cookieless 302 that
- * would silently dump the iframe on Sim's own login page.
+ * PUBLIC server API — `auth.api.signUpEmail` / `signInEmail` with
+ * `asResponse: true` and NO inbound headers (a trusted server call) — and
+ * forward the resulting `Set-Cookie` headers onto our redirect. Passing the
+ * inbound request headers makes better-auth re-derive origin / trustedOrigins
+ * / base-URL from the internal bind host and 500 the mint (the failure the 1.4
+ * smoke gate caught); omitting them keeps it a clean server-trusted mint. This
+ * also keeps cookie name / signing / SameSite in lockstep with the running
+ * better-auth version (1.6.x) instead of re-implementing its cookie crypto.
+ * The cross-site `SameSite=None; Secure; Partitioned` attributes come from the
+ * `auth.ts` overlay (patch-sim-source.mjs #4), which applies them whenever
+ * SIM_FRAME_ANCESTORS is set. A handoff that fails to produce a Set-Cookie
+ * returns 500 (LOUD) rather than a cookieless 302 that would silently dump the
+ * iframe on Sim's own login page.
  */
 
 import { createHash } from "crypto";
@@ -140,36 +144,72 @@ function forwardSetCookies(from: Response, to: NextResponse): boolean {
   return false;
 }
 
+/** A response is usable only if it's OK AND actually carries a Set-Cookie. */
+function responseHasSessionCookie(res: Response): boolean {
+  const h = res.headers as Headers & { getSetCookie?: () => string[] };
+  if (typeof h.getSetCookie === "function" && h.getSetCookie().length > 0) return true;
+  return res.headers.has("set-cookie");
+}
+
+/** Best-effort short body snippet for diagnostics (never throws). */
+async function bodySnippet(res: Response): Promise<string> {
+  try {
+    const text = await res.clone().text();
+    return text.slice(0, 300);
+  } catch {
+    return "<unreadable>";
+  }
+}
+
 /**
  * Mint a Sim session for the colony user and return the better-auth Response
- * that carries its Set-Cookie. Sign in if the user exists; otherwise sign up
- * (autoSignIn → a session). Returns null if neither yields an OK response.
+ * that carries its Set-Cookie.
+ *
+ * CRITICAL: these are TRUSTED SERVER calls — we deliberately do NOT forward
+ * the inbound request `headers`. Passing them makes better-auth treat this as
+ * if it were handling that HTTP request (origin/trustedOrigins + CSRF + base-URL
+ * resolution), which 500s the mint when the colony's `BETTER_AUTH_URL` /
+ * trustedOrigins don't line up with the internal bind host (the failure the
+ * 1.4 smoke gate caught). Without headers it's a server-trusted call that just
+ * creates the session and returns the `Set-Cookie`.
+ *
+ * Order: signUp FIRST (a colony's Sim DB is fresh on first boot, so the colony
+ * user doesn't exist yet → signUp + autoSignIn mints a session). If the user
+ * already exists (restart / second handoff), signUp errors and we fall back to
+ * signInEmail. Either way we require a real Set-Cookie before returning.
  */
 async function mintSessionResponse(req: NextRequest): Promise<Response | null> {
   const email = colonyUserEmail(req);
   const password = colonyUserPassword(email);
-  const headers = req.headers;
-
-  try {
-    const signedIn = await auth.api.signInEmail({
-      body: { email, password },
-      headers,
-      asResponse: true,
-    });
-    if (signedIn.ok) return signedIn;
-  } catch (err) {
-    logger.info("hive-handoff signInEmail miss (will try signUp)", { err: String(err) });
-  }
 
   try {
     const signedUp = await auth.api.signUpEmail({
       body: { email, password, name: "Hive CEO" },
-      headers,
       asResponse: true,
     });
-    if (signedUp.ok) return signedUp;
+    if (signedUp.ok && responseHasSessionCookie(signedUp)) return signedUp;
+    logger.info("hive-handoff signUpEmail did not mint a session (will try signIn)", {
+      status: signedUp.status,
+      hasCookie: responseHasSessionCookie(signedUp),
+      body: await bodySnippet(signedUp),
+    });
   } catch (err) {
-    logger.error("hive-handoff signUpEmail failed", { err: String(err) });
+    logger.info("hive-handoff signUpEmail threw (will try signIn)", { err: String(err) });
+  }
+
+  try {
+    const signedIn = await auth.api.signInEmail({
+      body: { email, password },
+      asResponse: true,
+    });
+    if (signedIn.ok && responseHasSessionCookie(signedIn)) return signedIn;
+    logger.error("hive-handoff signInEmail did not mint a session", {
+      status: signedIn.status,
+      hasCookie: responseHasSessionCookie(signedIn),
+      body: await bodySnippet(signedIn),
+    });
+  } catch (err) {
+    logger.error("hive-handoff signInEmail threw", { err: String(err) });
   }
 
   return null;

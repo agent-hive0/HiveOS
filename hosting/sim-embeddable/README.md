@@ -15,9 +15,12 @@ standalone output.
 No Sim product behaviour is added — only the handoff + framing glue. Two
 Sim-version-specific seams to re-validate whenever the pinned Sim ref changes:
 the better-auth session mint in the handoff route (`mintSessionResponse`, uses
-the PUBLIC `auth.api.signInEmail` / `signUpEmail` with `asResponse: true` and
-forwards the resulting `Set-Cookie` — not `auth.$context`, whose
-`setSessionCookie` does not exist and silently no-ops), and the source anchors
-`patch-sim-source.mjs` keys off (the script aborts the build if any anchor
-moves). The release smoke test asserts a valid-token handoff returns a
-`Set-Cookie`, so a cookieless-mint regression fails the build, not production.
+the PUBLIC `auth.api.signUpEmail` / `signInEmail` with `asResponse: true` and
+**no inbound headers** — a trusted server call — and forwards the resulting
+`Set-Cookie`; passing the inbound headers makes better-auth re-derive
+origin/trustedOrigins/base-URL from the internal bind host and 500 the mint,
+and `auth.$context.setSessionCookie` does not exist / silently no-ops), and the
+source anchors `patch-sim-source.mjs` keys off (the script aborts the build if
+any anchor moves). The release smoke test asserts a valid-token handoff returns
+a `Set-Cookie` (and on failure dumps the route's `HiveHandoff` logs), so a
+cookieless-mint regression fails the build, not production.
