@@ -222,8 +222,13 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends postgresql-17 postgresql-17-pgvector postgresql-client-17 \
   && rm -rf /var/lib/apt/lists/*
 
-# Hermes CEO engine — newest from PyPI, pinned by the workflow.
-RUN pip3 install --no-cache-dir --break-system-packages "hermes-agent==${HERMES_VERSION}"
+# Hermes CEO engine — newest from PyPI, pinned by the workflow. The
+# `anthropic` SDK ships alongside so Hermes's `--provider anthropic` path
+# works: it routes agent LLM calls through the Hive gateway via the
+# colony's ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (HIVE_PROXY_TOKEN),
+# instead of calling OpenRouter directly. Without it the anthropic
+# provider raises ModuleNotFoundError at first turn.
+RUN pip3 install --no-cache-dir --break-system-packages "hermes-agent==${HERMES_VERSION}" "anthropic>=0.39.0"
 
 # Sim runtime: one glibc `bun` from the Sim build image runs app + realtime.
 COPY --from=sim_base /usr/local/bin/bun /usr/local/bin/bun
