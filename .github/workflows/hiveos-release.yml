@@ -243,11 +243,21 @@ jobs:
             if [ "$ok_mem" = 0 ] && curl -fsS -o /dev/null http://127.0.0.1:3101/healthz 2>/dev/null; then ok_mem=1; echo "[$i] Memory /healthz OK"; fi
             if [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ]; then break; fi
           done
+          # A valid-token handoff must MINT a session: 302 + Set-Cookie. A
+          # cookieless 302 is the exact regression that dumps the embedded
+          # iframe on Sim's own login page, so gate the build on it.
+          echo "=== Sim handoff session-cookie check ===" ; ok_cookie=0
+          for i in $(seq 1 12); do
+            hdrs=$(curl -s -D - -o /dev/null "http://127.0.0.1:3000/api/access/hive-handoff?token=smoke-proxy-token-000000000000000000000&to=/" 2>/dev/null || true)
+            if printf '%s' "$hdrs" | grep -iq '^set-cookie:'; then ok_cookie=1; echo "[$i] handoff valid-token sets a session cookie OK"; break; fi
+            echo "[$i] no Set-Cookie yet (Sim DB may still be migrating)…"; sleep 5
+          done
+          if [ "$ok_cookie" = 0 ]; then echo "--- handoff response headers (last) ---"; printf '%s\n' "$hdrs"; fi
           echo "=== Hermes engine ===" ; ok_herm=0
           if docker exec hiveos-smoke sh -lc 'hermes --version || hermes --help' >/dev/null 2>&1; then ok_herm=1; echo "Hermes CLI OK"; fi
           echo "--- container logs (tail) ---"; docker logs --tail 120 hiveos-smoke || true
-          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm"
-          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ]
+          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie"
+          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ]
 
       - name: Push hiveos:<version> (+ latest) on smoke pass
         if: ${{ inputs.push }}
