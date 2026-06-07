@@ -34,6 +34,12 @@ SIM_PUBLIC_URL="${SIM_PUBLIC_URL:-${PAPERCLIP_AUTH_PUBLIC_BASE_URL:-http://127.0
 # ancestors default to the Hive origins so the canvas is Hive-only.
 HIVE_SIM_HANDOFF_TOKEN="${HIVE_SIM_HANDOFF_TOKEN:-${HIVE_PROXY_TOKEN:-}}"
 SIM_FRAME_ANCESTORS="${SIM_FRAME_ANCESTORS:-https://agenthive.co https://*.agenthive.co}"
+# Sim /api/v1 workspace key seed: the gateway lists/runs workflows via Sim's
+# stable /api/v1 (X-API-Key) against a fixed workspace id. Seeded at boot by the
+# hive-seed-key overlay route from SIM_API_KEY (a Fly secret). Inert unless the
+# gate is on AND the key is present.
+SIM_WORKSPACE_ID="${SIM_WORKSPACE_ID:-hive}"
+HIVE_SIM_SEED_API_KEY="${HIVE_SIM_SEED_API_KEY:-1}"
 
 run_node() { gosu node "$@"; }
 psql_super() { gosu node "$PG_BIN/psql" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER" "$@"; }
@@ -138,6 +144,9 @@ if [ -f "$SIM_APP_DIR/apps/sim/server.js" ]; then
            HIVE_SIM_HANDOFF_TOKEN="$HIVE_SIM_HANDOFF_TOKEN" \
            SIM_FRAME_ANCESTORS="$SIM_FRAME_ANCESTORS" \
            SIM_COLONY_HOST="${SIM_COLONY_HOST:-}" \
+           SIM_API_KEY="${SIM_API_KEY:-}" \
+           SIM_WORKSPACE_ID="$SIM_WORKSPACE_ID" \
+           HIVE_SIM_SEED_API_KEY="$HIVE_SIM_SEED_API_KEY" \
            PORT=3000 HOSTNAME=0.0.0.0 NODE_ENV=production \
            SOCKET_SERVER_URL="http://127.0.0.1:3002" \
            gosu node "$BUN" apps/sim/server.js ) &
@@ -174,6 +183,26 @@ if [ -f "$SIDECAR_CLI" ]; then
     log "memory sidecar pid $!"
 else
     log "WARN memory sidecar cli.js missing — skipping"
+fi
+
+# --- 5. seed Sim /api/v1 workspace key (background, best-effort) -----------
+# Mint the workspace api_key row from SIM_API_KEY once Sim is serving, via the
+# token-gated overlay route (runs inside Sim's runtime so the encrypted key +
+# hash match what /api/v1 auth expects). Idempotent + non-fatal.
+if [ "$HIVE_SIM_SEED_API_KEY" = "1" ] && [ -n "${SIM_API_KEY:-}" ] && [ -n "$HIVE_SIM_HANDOFF_TOKEN" ]; then
+    (
+        i=0
+        while [ "$i" -lt 60 ]; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/api/access/hive-handoff" 2>/dev/null || echo 000)
+            if [ "$code" = "401" ]; then
+                resp=$(curl -s "http://127.0.0.1:3000/api/access/hive-seed-key?token=$HIVE_SIM_HANDOFF_TOKEN" 2>/dev/null || echo "")
+                log "sim api-key seed: $resp"
+                break
+            fi
+            i=$((i + 1)); sleep 2
+        done
+    ) &
+    log "sim api-key seed dispatched (pid $!)"
 fi
 
 log "engine startup dispatched"

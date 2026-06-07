@@ -111,6 +111,9 @@ jobs:
           mkdir -p vendor/sim/apps/sim/app/api/access/hive-handoff
           cp hosting/sim-embeddable/hive-handoff-route.ts \
              vendor/sim/apps/sim/app/api/access/hive-handoff/route.ts
+          mkdir -p vendor/sim/apps/sim/app/api/access/hive-seed-key
+          cp hosting/sim-embeddable/hive-seed-key-route.ts \
+             vendor/sim/apps/sim/app/api/access/hive-seed-key/route.ts
           cp hosting/sim-embeddable/hive-frame-ancestors.ts \
              vendor/sim/apps/sim/hive-frame-ancestors.ts
           # Patch Sim's own source so the Workflows CANVAS (not just the handoff
@@ -122,6 +125,7 @@ jobs:
           node hosting/sim-embeddable/patch-sim-source.mjs vendor/sim/apps/sim
           echo "overlay applied:"
           ls -la vendor/sim/apps/sim/app/api/access/hive-handoff/
+          ls -la vendor/sim/apps/sim/app/api/access/hive-seed-key/
 
       # The multi-engine build (Paperclip + Sim-from-source + Hermes + Memory)
       # overflows the stock ~14 GB free on ubuntu-latest -> "No space left on
@@ -231,6 +235,9 @@ jobs:
             -e HIVE_BOOTSTRAP_SECRET=smoke-bootstrap-secret-000000000000000 \
             -e HIVE_PROXY_TOKEN=smoke-proxy-token-000000000000000000000 \
             -e HIVE_SIM_HANDOFF_TOKEN=smoke-proxy-token-000000000000000000000 \
+            -e SIM_API_KEY=sk-sim-smoke000000000000000000000000000000000000 \
+            -e HIVE_SIM_SEED_API_KEY=1 \
+            -e SIM_WORKSPACE_ID=hive \
             -p 3100:3100 -p 3000:3000 -p 3101:3101 \
             hiveos:smoke
           echo "waiting for engines to boot…"
@@ -257,11 +264,26 @@ jobs:
             echo "--- HiveHandoff route logs (why the mint failed) ---"
             docker logs hiveos-smoke 2>&1 | grep -iE "hive-handoff|HiveHandoff" | tail -30 || true
           fi
+          # A boot-seeded workspace API key must let Sim's STABLE /api/v1 endpoint
+          # authenticate (stock Sim 401s without a key). This is what the gateway's
+          # native workflows list calls, so gate the build on it.
+          echo "=== Sim /api/v1 workspace-key seed check ===" ; ok_seed=0
+          for i in $(seq 1 18); do
+            scode=$(curl -s -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:3000/api/v1/workflows?workspaceId=hive&limit=1" \
+              -H "x-api-key: sk-sim-smoke000000000000000000000000000000000000" 2>/dev/null || echo 000)
+            if [ "$scode" = "200" ]; then ok_seed=1; echo "[$i] /api/v1/workflows authenticates with seeded key OK"; break; fi
+            echo "[$i] /api/v1 not seeded yet (code=$scode)…"; sleep 5
+          done
+          if [ "$ok_seed" = 0 ]; then
+            echo "--- HiveSeedKey route logs ---"
+            docker logs hiveos-smoke 2>&1 | grep -iE "hive-seed-key|HiveSeedKey|api-key seed" | tail -20 || true
+          fi
           echo "=== Hermes engine ===" ; ok_herm=0
           if docker exec hiveos-smoke sh -lc 'hermes --version || hermes --help' >/dev/null 2>&1; then ok_herm=1; echo "Hermes CLI OK"; fi
           echo "--- container logs (tail) ---"; docker logs --tail 120 hiveos-smoke || true
-          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie"
-          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ]
+          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie seed=$ok_seed"
+          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ] && [ "$ok_seed" = 1 ]
 
       - name: Push hiveos:<version> (+ latest) on smoke pass
         if: ${{ inputs.push }}

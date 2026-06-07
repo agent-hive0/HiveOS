@@ -8,6 +8,7 @@ standalone output.
 | File | Lands at (in Sim) | Purpose |
 |---|---|---|
 | `hive-handoff-route.ts` | `apps/sim/app/api/access/hive-handoff/route.ts` | Auth handoff broker. 401 tokenless (so the gateway probe learns it exists), mints a Sim better-auth session on a valid per-colony token, 302s (RELATIVE `Location`) to `to`. |
+| `hive-seed-key-route.ts` | `apps/sim/app/api/access/hive-seed-key/route.ts` | Boot seed for Sim's `/api/v1` workspace API key. Token-gated (same token as the handoff). When `HIVE_SIM_SEED_API_KEY=1` + `SIM_API_KEY` set, idempotently upserts the service `user` + `workspace` (`SIM_WORKSPACE_ID`) + `permissions` + `api_key` (`key_hash=sha256hex(SIM_API_KEY)`, `type='workspace'`) so the gateway's native workflows list authenticates. Fail-soft (200 on error). Called by `hiveos-engines.sh` once Sim is serving. |
 | `hive-frame-ancestors.ts` | `apps/sim/hive-frame-ancestors.ts` | Reads `SIM_FRAME_ANCESTORS` and emits the `frame-ancestors` CSP (used by the handoff route). |
 | `patch-sim-source.mjs` | (edits `csp.ts`, `proxy.ts`, `next.config.ts`, `lib/auth/auth.ts`) | Patches Sim's OWN source so the canvas (`/`, `/workspace/*`, `/w/*`) is framable: frame-ancestors from `SIM_FRAME_ANCESTORS`, no `X-Frame-Options: SAMEORIGIN` on canvas routes, and a `SameSite=None; Secure; Partitioned` session cookie. Idempotent; fails loudly if an upstream anchor moves. |
 | `wire-next-config.mjs` | (legacy) | Superseded by `patch-sim-source.mjs`; no longer invoked by the release workflow. Kept for reference. |
