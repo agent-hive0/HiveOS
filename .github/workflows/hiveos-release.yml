@@ -104,7 +104,7 @@ jobs:
             echo "| Memory (@hive/colony-sidecar) | \`hive-app@$MEMORY_REF\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Apply Sim embed overlay (handoff route + frame-ancestors)
+      - name: Apply Sim embed overlay (handoff route + frame-ancestors + canvas)
         working-directory: fork
         run: |
           set -euo pipefail
@@ -113,7 +113,13 @@ jobs:
              vendor/sim/apps/sim/app/api/access/hive-handoff/route.ts
           cp hosting/sim-embeddable/hive-frame-ancestors.ts \
              vendor/sim/apps/sim/hive-frame-ancestors.ts
-          node hosting/sim-embeddable/wire-next-config.mjs vendor/sim/apps/sim
+          # Patch Sim's own source so the Workflows CANVAS (not just the handoff
+          # route) is framable inside the Hive app shell: frame-ancestors from
+          # SIM_FRAME_ANCESTORS in csp.ts, drop X-Frame-Options:SAMEORIGIN on the
+          # canvas routes (proxy.ts middleware + next.config.ts), and a cross-site
+          # SameSite=None session cookie (auth.ts). Idempotent; fails loudly if an
+          # upstream anchor moves. Supersedes the old wire-next-config.mjs no-op.
+          node hosting/sim-embeddable/patch-sim-source.mjs vendor/sim/apps/sim
           echo "overlay applied:"
           ls -la vendor/sim/apps/sim/app/api/access/hive-handoff/
 

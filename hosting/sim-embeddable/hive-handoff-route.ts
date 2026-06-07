@@ -137,7 +137,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   try {
     const email = colonyUserEmail(req);
     const userId = await ensureColonyUser(email);
-    const res = withFraming(NextResponse.redirect(new URL(safeTo, req.nextUrl.origin), 302));
+    // Emit a RELATIVE Location (e.g. `/`) rather than building an absolute URL
+    // from `req.nextUrl.origin`. Behind Fly's proxy the bound origin resolves to
+    // the internal bind address (`https://0.0.0.0:3000`), which is unreachable
+    // from the browser. A relative 302 Location resolves against the browser's
+    // public colony origin, so the iframe lands on the real Sim canvas.
+    const res = withFraming(
+      new NextResponse(null, { status: 302, headers: { Location: safeTo } }),
+    );
     await mintSimSession(userId, res, req);
     return res;
   } catch (err) {
