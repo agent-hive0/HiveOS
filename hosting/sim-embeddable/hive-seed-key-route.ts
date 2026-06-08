@@ -35,14 +35,21 @@ import { createLogger } from "@sim/logger";
 import { and, eq } from "drizzle-orm";
 import { type NextRequest, NextResponse } from "next/server";
 import { encryptApiKey, hashApiKey } from "@/lib/api-key/crypto";
+import { auth } from "@/lib/auth/auth";
 
 const logger = createLogger("HiveSeedKey");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const SERVICE_USER_ID = "hive-gateway";
-const SERVICE_USER_EMAIL = "hive-gateway@agenthive.co";
+// WORKSPACE UNIFICATION: the seed user MUST be the SAME principal the embed
+// handoff signs in (hive-handoff-route.ts → SIM_HANDOFF_USER_EMAIL, default
+// sim-ceo@colony.agenthive.co). One user owns the workspace, owns the api_key,
+// AND is the session the gateway writes/canvas runs as — so the CEO (api_key)
+// and the session see the SAME workflows with the SAME permissions.
+const SERVICE_USER_ID = "hive-ceo";
+const SERVICE_USER_EMAIL =
+  (process.env.SIM_HANDOFF_USER_EMAIL ?? "").trim() || "sim-ceo@colony.agenthive.co";
 const SERVICE_KEY_ID = "hive-gateway-ws";
 const SERVICE_PERM_ID = "hive-gateway-ws-perm";
 
@@ -73,6 +80,21 @@ function presentedToken(req: NextRequest): string | null {
   return q ? q.trim() : null;
 }
 
+/**
+ * Derive the same password the handoff route uses for `signInEmail`. This
+ * keeps the seed and handoff in lockstep — the seed creates the account, the
+ * handoff signs in with the same derived password.
+ */
+function colonyUserPassword(email: string): string {
+  const secret = (
+    process.env.BETTER_AUTH_SECRET ??
+    process.env.HIVE_SIM_HANDOFF_TOKEN ??
+    process.env.HIVE_PROXY_TOKEN ??
+    ""
+  ).trim();
+  return createHash("sha256").update(`hive-sim-handoff:v1:${secret}:${email}`).digest("hex");
+}
+
 function workspaceId(): string {
   return (process.env.SIM_WORKSPACE_ID ?? "hive").trim() || "hive";
 }
@@ -85,18 +107,50 @@ async function seed(): Promise<{ status: string; detail?: string }> {
   const wsId = workspaceId();
   const now = new Date();
 
-  // 1) Service user (api_key.user_id FK). Idempotent on any conflict.
-  await db
-    .insert(user)
-    .values({
-      id: SERVICE_USER_ID,
-      name: "Agent Hive Gateway",
-      email: SERVICE_USER_EMAIL,
-      emailVerified: true,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoNothing();
+  // 1) Colony principal (api_key.user_id FK + handoff session). Created via
+  //    better-auth's signUpEmail so BOTH the `user` row AND the `account` row
+  //    (with password hash) exist — the handoff route's signInEmail then works
+  //    on the first gateway write call. Idempotent: if the user already exists
+  //    (handoff ran first, or a prior boot seeded it), we query the existing
+  //    row and proceed.
+  const password = colonyUserPassword(SERVICE_USER_EMAIL);
+  let svcUserId = SERVICE_USER_ID;
+  const [existingUser] = await db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.email, SERVICE_USER_EMAIL))
+    .limit(1);
+  if (existingUser) {
+    svcUserId = existingUser.id;
+  } else {
+    try {
+      const signedUp = await auth.api.signUpEmail({
+        body: { email: SERVICE_USER_EMAIL, password, name: "Hive CEO" },
+        asResponse: false,
+      });
+      if (signedUp?.user?.id) svcUserId = signedUp.user.id;
+    } catch {
+      // signUp threw (e.g. user already exists via race). Fall through to
+      // direct insert so the api_key FK is still satisfiable.
+      await db
+        .insert(user)
+        .values({
+          id: SERVICE_USER_ID,
+          name: "Hive CEO",
+          email: SERVICE_USER_EMAIL,
+          emailVerified: true,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing();
+      const [fallback] = await db
+        .select({ id: user.id })
+        .from(user)
+        .where(eq(user.email, SERVICE_USER_EMAIL))
+        .limit(1);
+      if (fallback) svcUserId = fallback.id;
+    }
+  }
 
   // 2) Workspace with the fixed id the gateway queries.
   await db
@@ -104,8 +158,8 @@ async function seed(): Promise<{ status: string; detail?: string }> {
     .values({
       id: wsId,
       name: "Agent Hive",
-      ownerId: SERVICE_USER_ID,
-      billedAccountUserId: SERVICE_USER_ID,
+      ownerId: svcUserId,
+      billedAccountUserId: svcUserId,
       createdAt: now,
       updatedAt: now,
     })
@@ -116,7 +170,7 @@ async function seed(): Promise<{ status: string; detail?: string }> {
     .insert(permissions)
     .values({
       id: SERVICE_PERM_ID,
-      userId: SERVICE_USER_ID,
+      userId: svcUserId,
       entityType: "workspace",
       entityId: wsId,
       permissionType: "admin",
@@ -144,9 +198,9 @@ async function seed(): Promise<{ status: string; detail?: string }> {
     .where(and(eq(apiKey.workspaceId, wsId), eq(apiKey.type, "workspace")));
   await db.insert(apiKey).values({
     id: SERVICE_KEY_ID,
-    userId: SERVICE_USER_ID,
+    userId: svcUserId,
     workspaceId: wsId,
-    createdBy: SERVICE_USER_ID,
+    createdBy: svcUserId,
     name: "hive-gateway",
     key: encrypted,
     keyHash,
