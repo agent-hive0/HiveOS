@@ -454,4 +454,72 @@ function applyHiveEmbedLoginGuard(
   }
 }
 
+// ---------------------------------------------------------------------------
+// 5. app/api/workflows/route.ts — accept the workspace X-API-Key on CREATE
+// ---------------------------------------------------------------------------
+// The native Hive Workflows UI / CEO authors workflows through the colony's Sim
+// over the seeded workspace `X-API-Key` (see hive-seed-key-route.ts). Reads work
+// because the v1 + `[id]` routes use `checkHybridAuth` (session OR internal JWT
+// OR API key). But the collection CREATE handler (POST /api/workflows) used
+// `checkSessionOrInternalAuth`, which REJECTS API keys outright -> 401 on create.
+// Swap the POST handler to `checkHybridAuth` so the workspace key authenticates,
+// and add the same workspace-scope guard the `[id]` route uses so a workspace
+// key can only create in the workspace it is bound to. Ownership still resolves
+// from the hybrid-auth `userId` (the seeded service user, which has an `admin`
+// workspace permission row) through the existing `getUserEntityPermissions`
+// check — no new auth invented. Fails LOUDLY if an upstream anchor moves.
+{
+  const { p, src: orig } = read('app/api/workflows/route.ts')
+  if (orig.includes(MARKER)) {
+    console.log('[patch-sim-source] workflows/route.ts already patched — skipping')
+  } else {
+    let src = orig
+
+    // 5a. Import checkHybridAuth alongside the existing helper.
+    const importAnchor = "import { checkSessionOrInternalAuth } from '@/lib/auth/hybrid'"
+    src = replaceOnce(
+      src,
+      importAnchor,
+      "import { checkHybridAuth, checkSessionOrInternalAuth } from '@/lib/auth/hybrid'",
+      'workflows/route.ts import',
+    )
+
+    // 5b. POST handler: swap the auth call. The POST handler is the only one that
+    // binds the request param as `req` (GET/others use `request`), so this anchor
+    // is unique to the create handler.
+    const postAuthAnchor =
+      '  const auth = await checkSessionOrInternalAuth(req, { requireWorkflowId: false })'
+    src = replaceOnce(
+      src,
+      postAuthAnchor,
+      '  const auth = await checkHybridAuth(req, { requireWorkflowId: false })',
+      'workflows/route.ts POST auth call',
+    )
+
+    // 5c. Workspace-scope guard for workspace API keys, inserted right before the
+    // per-user permission check (mirror of the `[id]` route's workspace-key guard).
+    const permAnchor =
+      "    const workspacePermission = await getUserEntityPermissions(userId, 'workspace', workspaceId)"
+    src = replaceOnce(
+      src,
+      permAnchor,
+      `    // ${MARKER} A workspace-scoped API key may only create workflows in the
+    // workspace it is bound to (mirror of the [id] route's workspace-key guard).
+    // Ownership otherwise resolves from the hybrid-auth userId below.
+    if (auth.apiKeyType === 'workspace' && auth.workspaceId !== workspaceId) {
+      return NextResponse.json(
+        { error: 'API key is not authorized for this workspace' },
+        { status: 403 }
+      )
+    }
+
+` + permAnchor,
+      'workflows/route.ts POST workspace guard',
+    )
+
+    writeFileSync(p, src)
+    console.log('[patch-sim-source] workflows/route.ts patched (create accepts X-API-Key)')
+  }
+}
+
 console.log('[patch-sim-source] all Sim embed patches applied')

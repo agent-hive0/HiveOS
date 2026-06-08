@@ -280,6 +280,25 @@ jobs:
             echo "--- HiveSeedKey route logs ---"
             docker logs hiveos-smoke 2>&1 | grep -iE "hive-seed-key|HiveSeedKey|api-key seed" | tail -20 || true
           fi
+          # The CREATE collection route (POST /api/workflows) must ALSO accept the
+          # seeded workspace key — this is what the native Hive Workflows UI / CEO
+          # uses to AUTHOR workflows. Stock Sim's create handler used
+          # checkSessionOrInternalAuth and 401'd on an API key; the embed overlay
+          # swaps it to checkHybridAuth. Gate the build on a 2xx create.
+          echo "=== Sim workflow CREATE workspace-key check ===" ; ok_create=0
+          for i in $(seq 1 18); do
+            ccode=$(curl -s -o /dev/null -w '%{http_code}' \
+              -X POST "http://127.0.0.1:3000/api/workflows" \
+              -H "x-api-key: sk-sim-smoke000000000000000000000000000000000000" \
+              -H "content-type: application/json" \
+              -d '{"name":"smoke-create","workspaceId":"hive"}' 2>/dev/null || echo 000)
+            if [ "$ccode" = "200" ] || [ "$ccode" = "201" ]; then ok_create=1; echo "[$i] POST /api/workflows with seeded key -> $ccode OK"; break; fi
+            echo "[$i] create not accepting key yet (code=$ccode)…"; sleep 5
+          done
+          if [ "$ok_create" = 0 ]; then
+            echo "--- workflow create logs (why the key was rejected) ---"
+            docker logs hiveos-smoke 2>&1 | grep -iE "WorkflowAPI|workflow creation|Unauthorized" | tail -20 || true
+          fi
           # Never-show-login guard (embed mode is ON via SIM_FRAME_ANCESTORS). An
           # unauthenticated GET /login MUST cleanly 302 into the authenticated
           # handoff — NOT 500 (the middleware-adapter crash we just fixed) and NOT
@@ -304,8 +323,8 @@ jobs:
           echo "=== Hermes engine ===" ; ok_herm=0
           if docker exec hiveos-smoke sh -lc 'hermes --version || hermes --help' >/dev/null 2>&1; then ok_herm=1; echo "Hermes CLI OK"; fi
           echo "--- container logs (tail) ---"; docker logs --tail 120 hiveos-smoke || true
-          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie seed=$ok_seed guard=$ok_guard"
-          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ] && [ "$ok_seed" = 1 ] && [ "$ok_guard" = 1 ]
+          echo "RESULT paperclip=$ok_pc sim=$ok_sim memory=$ok_mem hermes=$ok_herm cookie=$ok_cookie seed=$ok_seed create=$ok_create guard=$ok_guard"
+          [ "$ok_pc" = 1 ] && [ "$ok_sim" = 1 ] && [ "$ok_mem" = 1 ] && [ "$ok_herm" = 1 ] && [ "$ok_cookie" = 1 ] && [ "$ok_seed" = 1 ] && [ "$ok_create" = 1 ] && [ "$ok_guard" = 1 ]
 
       - name: Push hiveos:<version> (+ latest) on smoke pass
         if: ${{ inputs.push }}
