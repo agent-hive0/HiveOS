@@ -283,13 +283,15 @@ jobs:
           # Never-show-login guard (embed mode is ON via SIM_FRAME_ANCESTORS). An
           # unauthenticated GET /login MUST cleanly 302 into the authenticated
           # handoff — NOT 500 (the middleware-adapter crash we just fixed) and NOT
-          # Sim's own login form. This is the exact colony0 regression, so gate on it.
+          # Sim's own login form. The absolute Location MUST also pin Sim's public
+          # TLS port :8443 (Paperclip owns :443; Fly drops the port from
+          # x-forwarded-host), else the redirect 404s on Paperclip. Gate on both.
           echo "=== Embed never-show-login guard check ===" ; ok_guard=0
           for i in $(seq 1 18); do
             gcode=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/login" 2>/dev/null || echo 000)
             gloc=$(curl -s -D - -o /dev/null "http://127.0.0.1:3000/login" 2>/dev/null | tr -d '\r' | grep -i '^location:' | head -1)
-            if [ "$gcode" = "302" ] && printf '%s' "$gloc" | grep -q '/api/access/hive-handoff'; then
-              ok_guard=1; echo "[$i] GET /login (embed) -> 302 into hive-handoff OK ($gloc)"; break
+            if [ "$gcode" = "302" ] && printf '%s' "$gloc" | grep -q ':8443/api/access/hive-handoff'; then
+              ok_guard=1; echo "[$i] GET /login (embed) -> 302 into :8443 hive-handoff OK ($gloc)"; break
             fi
             echo "[$i] /login not guarding yet (code=$gcode loc=${gloc:-none})…"; sleep 5
           done

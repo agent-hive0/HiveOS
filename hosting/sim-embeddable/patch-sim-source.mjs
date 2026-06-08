@@ -252,25 +252,30 @@ function hiveReconnectingResponse(): NextResponse {
   })
 }
 
-// ${MARKER} The PUBLIC colony origin, reconstructed from the inbound proxy
-// headers. A middleware redirect MUST carry an ABSOLUTE, parseable Location:
-// Next's middleware adapter runs \`new NextURL(location)\` on whatever Location we
-// set, and a RELATIVE path throws \`TypeError: Invalid URL\` there -> the request
-// 500s (the bug this guard had). We must NOT build the absolute URL from
-// request.nextUrl.origin: behind Fly's proxy that resolves to the internal bind
-// host (https://0.0.0.0:3000), unreachable from the browser. The Host /
-// X-Forwarded-* headers carry the real public origin the customer is on, so the
-// redirect lands back on the same public colony host (effectively relative).
+// ${MARKER} The PUBLIC colony origin for Sim, reconstructed from the inbound
+// proxy headers and FORCED onto Sim's public TLS port :8443. A middleware
+// redirect MUST carry an ABSOLUTE, parseable Location: Next's middleware adapter
+// runs \`new NextURL(location)\` on whatever Location we set, and a RELATIVE path
+// throws \`TypeError: Invalid URL\` there -> the request 500s (the original bug
+// this guard had). We must NOT build the absolute URL from request.nextUrl.origin:
+// behind Fly's proxy that resolves to the internal bind host
+// (https://0.0.0.0:3000), unreachable from the browser.
+//
+// Why :8443 is forced: Sim is ALWAYS published publicly on :8443 (Paperclip owns
+// :443) — see the canonical \`sim: 8443\` mapping in
+// apps/gateway/src/lib/colony-engines.ts. But Fly's :8443 TLS handler forwards
+// x-forwarded-host = "<colony>.fly.dev" WITHOUT the :8443 suffix, so the raw host
+// resolves to :443 (Paperclip) and the handoff redirect 404s there. There is no
+// env var carrying Sim's public :8443 origin, so we strip any port off the host
+// and pin :8443 explicitly. Always https (Sim's public port is TLS-only).
 function hivePublicOrigin(request: NextRequest): string {
   const first = (v: string | null): string => (v ? v.split(',')[0].trim() : '')
-  const host =
+  const rawHost =
     first(request.headers.get('x-forwarded-host')) ||
     first(request.headers.get('host')) ||
     request.nextUrl.host
-  const proto =
-    first(request.headers.get('x-forwarded-proto')) ||
-    (request.nextUrl.protocol ? request.nextUrl.protocol.replace(':', '') : 'https')
-  return proto + '://' + host
+  const host = rawHost.replace(/:\\d+$/, '')
+  return 'https://' + host + ':8443'
 }
 
 function isHiveAuthRoute(pathname: string): boolean {
