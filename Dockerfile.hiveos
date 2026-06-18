@@ -8,6 +8,7 @@
 #                                   (hive-handoff route + frame-ancestors)
 #   • Hermes      (CLI)           — CEO engine, spawned by Paperclip's adapter
 #   • Memory      (:3101)         — @hive/colony-sidecar, built from hive-app
+#   • Mem0        (:3102)         — @hive/mem0-svc (self-hosted, localhost-only)
 #
 # Built only by .github/workflows/hiveos-release.yml, which supplies the Sim
 # source as build-context `simsrc` (with the embed overlay pre-applied) and
@@ -258,6 +259,13 @@ COPY --from=sidecar_build --chown=node:node /build/packages/colony-db /opt/hive-
 COPY --from=sidecar_build --chown=node:node /build/packages/colony-db/migrations /opt/hive-colony-sidecar/packages/colony-sidecar/migrations
 COPY --from=sidecar_build --chown=node:node /build/package.json /opt/hive-colony-sidecar/
 
+# Mem0 memory service (@hive/mem0-svc, from-source) -> /opt/hive-mem0.
+# Pure-Python FastAPI over the mem0ai SDK; vectors land in the embedded `mem0`
+# Postgres DB and the LLM/embedder route through the colony's managed gateway.
+# Reached only via the sidecar's /memory/mem0/* proxy (never exposed directly).
+COPY --from=hiveappsrc --chown=node:node packages/mem0-svc /opt/hive-mem0
+RUN pip3 install --no-cache-dir --break-system-packages -r /opt/hive-mem0/requirements.txt
+
 COPY scripts/docker-entrypoint.sh scripts/hiveos-engines.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/hiveos-engines.sh \
   && ln -sf /usr/local/bin/hiveos-engines.sh /usr/local/bin/hive-engines.sh
@@ -289,7 +297,7 @@ LABEL org.opencontainers.image.title="hiveos" \
       co.agenthive.hiveos.memory.ref="${MEMORY_REF}"
 
 VOLUME ["/paperclip"]
-# 3100 Paperclip · 3000 Sim app · 3002 Sim realtime · 3101 memory sidecar
+# 3100 Paperclip · 3000 Sim app · 3002 Sim realtime · 3101 memory sidecar · 3102 mem0 (localhost-only)
 EXPOSE 3100 3000 3002 3101
 
 ENTRYPOINT ["docker-entrypoint.sh"]

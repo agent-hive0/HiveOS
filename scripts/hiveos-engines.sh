@@ -61,6 +61,14 @@ fi
 # shellcheck disable=SC1090
 . "$SECRETS_FILE"
 
+# Mem0 internal API key — generated once + persisted (appended for colonies that
+# predate Mem0). Authenticates the sidecar→mem0-svc hop; never leaves the colony.
+if [ -z "${MEM0_API_KEY:-}" ]; then
+    MEM0_API_KEY="$(gen_hex)"
+    echo "MEM0_API_KEY=$MEM0_API_KEY" >> "$SECRETS_FILE"
+    log "generated MEM0_API_KEY -> $SECRETS_FILE"
+fi
+
 # --- 2. pgvector Postgres on the volume ------------------------------------
 mkdir -p /paperclip/sim-pg
 chown -R node:node /paperclip/sim-pg 2>/dev/null || true
@@ -89,7 +97,7 @@ if ! run_node "$PG_BIN/pg_isready" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_SUPERUSER
     return 0 2>/dev/null || exit 0
 fi
 
-for db in sim hive_app; do
+for db in sim hive_app mem0; do
     exists=$(psql_super -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" 2>/dev/null)
     if [ "$exists" != "1" ]; then
         log "creating database $db"
@@ -178,11 +186,32 @@ if [ -f "$SIDECAR_CLI" ]; then
     ( cd "$SIDECAR_DIR" \
         && DATABASE_URL="$HIVE_APP_DB_URL" \
            HIVE_PROXY_TOKEN="${HIVE_PROXY_TOKEN:-}" \
+           MEM0_API_KEY="$MEM0_API_KEY" \
+           EMBEDDED_MEM0_BASE_URL="http://127.0.0.1:3102" \
            PORT=3101 NODE_ENV=production \
            gosu node node --enable-source-maps "$SIDECAR_CLI" ) &
     log "memory sidecar pid $!"
 else
     log "WARN memory sidecar cli.js missing — skipping"
+fi
+
+# Mem0 memory service (:3102) — vectors in the embedded `mem0` DB; LLM + embedder
+# routed through the colony's managed gateway (OPENAI_BASE_URL). Localhost-only;
+# reached via the sidecar's /memory/mem0/* proxy. Lazy-builds on first request,
+# so a cold Postgres at fork time is fine.
+if [ -f "/opt/hive-mem0/mem0_svc/app.py" ]; then
+    log "starting Mem0 service on :3102"
+    ( cd /opt/hive-mem0 \
+        && MEM0_API_KEY="$MEM0_API_KEY" \
+           POSTGRES_HOST="$PG_HOST" POSTGRES_PORT="$PG_PORT" \
+           POSTGRES_DB=mem0 POSTGRES_USER="$PG_SUPERUSER" POSTGRES_PASSWORD="" \
+           OPENAI_BASE_URL="${OPENAI_BASE_URL:-}" \
+           OPENAI_API_KEY="${OPENAI_API_KEY:-${HIVE_PROXY_TOKEN:-}}" \
+           PYTHONPATH=/opt/hive-mem0 PYTHONUNBUFFERED=1 \
+           gosu node python3 -m uvicorn mem0_svc.app:app --host 127.0.0.1 --port 3102 ) &
+    log "Mem0 service pid $!"
+else
+    log "WARN Mem0 app.py missing — skipping"
 fi
 
 # --- 5. seed Sim /api/v1 workspace key (background, best-effort) -----------
