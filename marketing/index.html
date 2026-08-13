@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#050506" />
+    <title>Paperclip — The backbone of the autonomous economy</title>
+    <meta
+      name="description"
+      content="Paperclip is the control plane for companies run entirely by AI agents. Org charts, goals, budgets, approvals, and heartbeats — one governed control plane for the autonomous economy."
+    />
+    <meta property="og:title" content="Paperclip — The backbone of the autonomous economy" />
+    <meta
+      property="og:description"
+      content="Open-source orchestration for zero-human companies. Give your agents a company: org charts, goals, budgets, approvals, and heartbeats."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="./assets/frames/hero-1.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
+    <link rel="preload" as="image" href="./assets/hero/f-001.webp" />
+    <link rel="preload" as="image" href="./assets/hero/f-048.webp" />
+    <link rel="stylesheet" href="./styles.css" />
+    <noscript>
+      <style>
+        .experience,
+        .site-progress { display: none !important; }
+        .static-fallback { display: block !important; }
+      </style>
+    </noscript>
+  </head>
+  <body>
+    <!-- Top navigation -->
+    <header class="nav" id="nav">
+      <a class="nav__brand" href="#top" aria-label="Paperclip home">
+        <span class="nav__mark" aria-hidden="true">
+          <svg viewBox="-4 -4 32 32" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="-4" y="-4" width="32" height="32" rx="7" fill="#2563EB" />
+            <path
+              stroke="#ffffff"
+              stroke-width="2.2"
+              d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"
+            />
+          </svg>
+        </span>
+        <span class="nav__word">Paperclip</span>
+      </a>
+      <nav class="nav__links" aria-label="Primary">
+        <a href="https://github.com/paperclipai/paperclip" target="_blank" rel="noreferrer">GitHub</a>
+        <a href="https://paperclip.ing/docs" target="_blank" rel="noreferrer">Docs</a>
+        <a class="nav__cta" href="https://github.com/paperclipai/paperclip#quickstart" target="_blank" rel="noreferrer">Get started</a>
+      </nav>
+    </header>
+
+    <!-- Scroll progress rail -->
+    <div class="site-progress" aria-hidden="true"><span id="progressBar"></span></div>
+
+    <!-- Frame-by-frame scroll experience -->
+    <main class="experience" id="top">
+      <!-- The pinned render surface. Everything visual is drawn here per frame. -->
+      <canvas class="stage" id="stage"></canvas>
+
+      <!-- Grain + vignette overlays (CSS, cheap) -->
+      <div class="stage-fx" aria-hidden="true"></div>
+
+      <!-- HTML copy layers, opacity/transform driven by scroll timeline -->
+      <div class="copy" aria-hidden="false">
+        <section class="beat" data-beat="0">
+          <p class="beat__eyebrow">Paperclip</p>
+          <h1 class="beat__title">The backbone of the<br />autonomous economy.</h1>
+          <p class="beat__sub">The control plane for companies run entirely by AI agents.</p>
+        </section>
+
+        <section class="beat" data-beat="1">
+          <p class="beat__eyebrow">The problem</p>
+          <h2 class="beat__title">Twenty terminals.<br />Zero control.</h2>
+          <p class="beat__sub">Your agents are working — but who's steering? Work scatters, context evaporates, spend runs wild.</p>
+        </section>
+
+        <section class="beat" data-beat="2">
+          <p class="beat__eyebrow">The shift</p>
+          <h2 class="beat__title">Give your agents<br />a company.</h2>
+          <p class="beat__sub">Org charts, roles and reporting lines your agents actually operate inside. If OpenClaw is an <em>employee</em>, Paperclip is the <em>company</em>.</p>
+        </section>
+
+        <section class="beat" data-beat="3">
+          <p class="beat__eyebrow">In motion</p>
+          <h2 class="beat__title">Goals flow down.<br />Work flows up.</h2>
+          <p class="beat__sub">Every task traces to the mission. Budgets, approvals and heartbeats — one governed control plane.</p>
+        </section>
+
+        <section class="beat" data-beat="4">
+          <p class="beat__eyebrow">The economy</p>
+          <h2 class="beat__title">Not one company.<br />Thousands.</h2>
+          <p class="beat__sub">An economic layer that never sleeps — autonomous companies, coordinated on Paperclip.</p>
+        </section>
+
+        <section class="beat beat--final" data-beat="5">
+          <p class="beat__eyebrow">Paperclip</p>
+          <h2 class="beat__title">Run your company.<br />Not your terminals.</h2>
+          <p class="beat__sub">Open-source orchestration for zero-human companies.</p>
+          <div class="beat__actions">
+            <a class="btn btn--primary" href="https://github.com/paperclipai/paperclip#quickstart" target="_blank" rel="noreferrer">Get started</a>
+            <a class="btn" href="https://paperclip.ing/docs" target="_blank" rel="noreferrer">Read the docs</a>
+            <a class="btn btn--ghost" href="https://github.com/paperclipai/paperclip" target="_blank" rel="noreferrer">Star on GitHub</a>
+          </div>
+          <div class="beat__foot">
+            <a href="https://discord.gg/m4HZY7xNG3" target="_blank" rel="noreferrer">Discord</a>
+            <span>·</span>
+            <a href="https://x.com/papercliping" target="_blank" rel="noreferrer">Twitter</a>
+            <span>·</span>
+            <span class="beat__foot-muted">MIT licensed</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- Scroll hint, hidden after first scroll -->
+      <div class="scroll-hint" id="scrollHint" aria-hidden="true">
+        <span>Scroll</span>
+        <span class="scroll-hint__line"></span>
+      </div>
+
+      <!-- Tall element that provides the scroll distance driving the timeline -->
+      <div class="scroll-driver" id="scrollDriver"></div>
+    </main>
+
+    <!-- Static, no-motion / no-JS fallback (accessible, SEO-friendly) -->
+    <div class="static-fallback" id="staticFallback">
+      <section class="sf-hero">
+        <img src="./assets/frames/hero-1.jpg" alt="A glowing chrome paperclip in a dark void" loading="eager" />
+        <div class="sf-hero__copy">
+          <p class="sf-eyebrow">Paperclip</p>
+          <h1>The backbone of the autonomous economy.</h1>
+          <p class="sf-sub">The control plane for companies run entirely by AI agents.</p>
+          <div class="sf-actions">
+            <a class="btn btn--primary" href="https://github.com/paperclipai/paperclip#quickstart">Get started</a>
+            <a class="btn" href="https://paperclip.ing/docs">Read the docs</a>
+          </div>
+        </div>
+      </section>
+      <section class="sf-beat">
+        <h2>Twenty terminals. Zero control.</h2>
+        <p>Your agents are working — but who's steering? Work scatters, context evaporates, spend runs wild.</p>
+      </section>
+      <section class="sf-beat">
+        <h2>Give your agents a company.</h2>
+        <p>Org charts, roles and reporting lines your agents actually operate inside. If OpenClaw is an employee, Paperclip is the company.</p>
+      </section>
+      <section class="sf-beat">
+        <h2>Goals flow down. Work flows up.</h2>
+        <p>Every task traces to the mission. Budgets, approvals and heartbeats — one governed control plane.</p>
+      </section>
+      <section class="sf-beat sf-beat--img">
+        <img src="./assets/frames/network.jpg" alt="A vast network of glowing paperclip nodes receding to the horizon" loading="lazy" />
+        <h2>Not one company. Thousands.</h2>
+        <p>An economic layer that never sleeps — autonomous companies, coordinated on Paperclip.</p>
+      </section>
+      <section class="sf-beat">
+        <h2>Run your company. Not your terminals.</h2>
+        <p>Open-source orchestration for zero-human companies.</p>
+        <div class="sf-actions">
+          <a class="btn btn--primary" href="https://github.com/paperclipai/paperclip#quickstart">Get started</a>
+          <a class="btn" href="https://github.com/paperclipai/paperclip">Star on GitHub</a>
+        </div>
+      </section>
+    </div>
+
+    <script src="./main.js" type="module"></script>
+  </body>
+</html>
